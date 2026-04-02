@@ -1,0 +1,33 @@
+# LLM Proxy recording filter configuration
+#
+# Environment variables (can also be set here):
+#   upstream_url: http://localhost:8080
+#   listen_port: 9090
+#   log_dir: /data/logs
+#   log_level: INFO
+#   max_body_log_size: 10485760
+
+# Recording filter rules — apply to both HTTP requests and WebSocket connections.
+# - include: only record paths matching these rules (if empty, record all)
+# - exclude: never record paths matching these rules (overrides include)
+#
+# Each rule can be:
+#   - A plain string: prefix match (e.g. "/v1/chat" matches "/v1/chat/completions")
+#   - An object with "pattern" and "regex: true": full regex match
+recording:
+  include: []
+    # Examples (prefix match):
+    # - "/v1/chat/completions"
+    # - "/v1/embeddings"
+    # - "/v1/realtime"          # OpenAI realtime WebSocket
+    # Regex match:
+    # - pattern: "^/v1/(chat|embeddings|realtime)"
+    #   regex: true
+
+  exclude:
+    - "/health"
+    - "/ready"
+    - "/metrics"
+    # - "/v1/models"            # skip model listing endpoints
+    # - pattern: "^/internal/"
+    #   regex: true

@@ -1,0 +1,22 @@
+services:
+  llm-proxy:
+    build: .
+    container_name: llm-proxy
+    restart: unless-stopped
+    ports:
+      - "${PROXY_PORT:-9090}:9090"
+    environment:
+      UPSTREAM_URL: ${UPSTREAM_URL:-http://llm-provider:8080}
+      LISTEN_PORT: "9090"
+      LOG_DIR: /data/logs
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      CONFIG_FILE: /etc/llm-proxy/config.yaml
+    volumes:
+      - llm-proxy-logs:/data/logs
+      - ./config.yaml:/etc/llm-proxy/config.yaml:ro
+    # depends_on:
+    #   - llm-provider  # uncomment and set your downstream service
+
+volumes:
+  llm-proxy-logs:
+    driver: local

@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[oc]
+*.egg-info/
+build/
+dist/
+wheels/
+
+# Virtual environments
+.venv/
+
+# Test/coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local data
+/data/
+*.db
+*.jsonl
+
+# Editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
