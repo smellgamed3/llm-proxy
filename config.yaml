@@ -6,6 +6,12 @@
 #   log_dir: /data/logs
 #   log_level: INFO
 #   max_body_log_size: 10485760
+#   preserve_host: true
+
+# Reverse proxy behavior:
+# - preserve_host: forward the client-visible Host header to upstream
+#   (recommended for management UI / status pages / redirect-heavy apps)
+preserve_host: true
 
 # Recording filter rules — apply to both HTTP requests and WebSocket connections.
 # - include: only record paths matching these rules (if empty, record all)

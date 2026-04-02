@@ -32,14 +32,17 @@ def make_proxy_with_upstream(
     tmp_path: Path,
     upstream_app: Starlette,
     recording_filter: RecordingFilter | None = None,
+    upstream_base_url: str = "http://testserver",
+    preserve_host: bool = True,
 ) -> tuple[TestClient, TestClient, Recorder]:
     """Return (proxy_client, upstream_client, recorder)."""
     upstream_client = TestClient(upstream_app, raise_server_exceptions=True)
 
     log_dir = str(tmp_path / "logs")
     cfg = Config(
-        upstream_url="http://testserver",
+        upstream_url=upstream_base_url,
         log_dir=log_dir,
+        preserve_host=preserve_host,
         recording_filter=recording_filter or RecordingFilter(),
     )
     recorder = Recorder(cfg)
@@ -54,7 +57,7 @@ def make_proxy_with_upstream(
     # Replace the httpx client's transport with a transport backed by the upstream TestClient
     proxy_handler.client = httpx.AsyncClient(
         transport=httpx.ASGITransport(app=upstream_app),  # type: ignore[arg-type]
-        base_url="http://testserver",
+        base_url=upstream_base_url,
         timeout=httpx.Timeout(connect=5, read=30, write=10, pool=5),
         follow_redirects=False,
     )
@@ -164,6 +167,188 @@ class TestHTTPProxyForwarding:
         client, _, _ = make_proxy_with_upstream(tmp_path, upstream)
         resp = client.get("/v1/test")
         assert resp.headers.get("x-custom") == "value123"
+
+    def test_x_forwarded_headers_added(self, tmp_path: Path):
+        async def echo_headers(req: Request):
+            return JSONResponse(
+                {
+                    "host": req.headers.get("host"),
+                    "x-forwarded-proto": req.headers.get("x-forwarded-proto"),
+                    "x-forwarded-host": req.headers.get("x-forwarded-host"),
+                    "x-forwarded-port": req.headers.get("x-forwarded-port"),
+                    "x-forwarded-for": req.headers.get("x-forwarded-for"),
+                    "x-real-ip": req.headers.get("x-real-ip"),
+                    "x-forwarded-server": req.headers.get("x-forwarded-server"),
+                    "forwarded": req.headers.get("forwarded"),
+                }
+            )
+
+        upstream = make_upstream([
+            Route("/{path:path}", echo_headers, methods=["GET"]),
+            Route("/", echo_headers, methods=["GET"]),
+        ])
+        client, _, _ = make_proxy_with_upstream(
+            tmp_path,
+            upstream,
+            upstream_base_url="http://upstream.internal:8080",
+        )
+
+        resp = client.get("/admin", headers={"host": "proxy.local"})
+        data = resp.json()
+        assert data["host"] == "proxy.local"
+        assert data["x-forwarded-proto"] == "http"
+        assert data["x-forwarded-host"] == "proxy.local"
+        assert data["x-forwarded-port"] == "80"
+        assert data["x-forwarded-for"]
+        assert data["x-real-ip"]
+        assert data["x-forwarded-server"]
+        assert "proto=http" in data["forwarded"]
+        assert "host=proxy.local" in data["forwarded"]
+
+    def test_can_disable_host_preservation(self, tmp_path: Path):
+        async def echo_headers(req: Request):
+            return JSONResponse({"host": req.headers.get("host")})
+
+        upstream = make_upstream([
+            Route("/{path:path}", echo_headers, methods=["GET"]),
+            Route("/", echo_headers, methods=["GET"]),
+        ])
+        client, _, _ = make_proxy_with_upstream(
+            tmp_path,
+            upstream,
+            upstream_base_url="http://upstream.internal:8080",
+            preserve_host=False,
+        )
+
+        resp = client.get("/admin", headers={"host": "proxy.local"})
+        assert resp.json()["host"] == "upstream.internal:8080"
+
+    def test_connection_declared_request_headers_stripped(self, tmp_path: Path):
+        async def echo_headers(req: Request):
+            return JSONResponse(
+                {
+                    "x-remove-me": req.headers.get("x-remove-me"),
+                    "x-keep": req.headers.get("x-keep"),
+                }
+            )
+
+        upstream = make_upstream([
+            Route("/{path:path}", echo_headers, methods=["GET"]),
+            Route("/", echo_headers, methods=["GET"]),
+        ])
+        client, _, _ = make_proxy_with_upstream(tmp_path, upstream)
+
+        resp = client.get(
+            "/headers",
+            headers={
+                "Connection": "keep-alive, x-remove-me",
+                "Keep-Alive": "timeout=5",
+                "X-Remove-Me": "bad",
+                "X-Keep": "good",
+            },
+        )
+        data = resp.json()
+        assert data["x-remove-me"] is None
+        assert data["x-keep"] == "good"
+
+    def test_raw_percent_encoded_path_preserved(self, tmp_path: Path):
+        async def echo_raw_path(req: Request):
+            return JSONResponse({"raw_path": req.scope["raw_path"].decode("ascii")})
+
+        upstream = make_upstream([
+            Route("/{path:path}", echo_raw_path, methods=["GET"]),
+            Route("/", echo_raw_path, methods=["GET"]),
+        ])
+        client, _, _ = make_proxy_with_upstream(tmp_path, upstream)
+
+        resp = client.get("/v1/files/a%2Fb")
+        assert resp.json()["raw_path"] == "/v1/files/a%2Fb"
+
+    def test_absolute_location_rewritten_to_proxy_origin(self, tmp_path: Path):
+        async def redirect(req: Request):
+            return Response(
+                status_code=302,
+                headers={"location": "http://upstream.internal:8080/login?next=%2Fadmin"},
+            )
+
+        upstream = make_upstream([
+            Route("/{path:path}", redirect, methods=["GET"]),
+            Route("/", redirect, methods=["GET"]),
+        ])
+        client, _, _ = make_proxy_with_upstream(
+            tmp_path,
+            upstream,
+            upstream_base_url="http://upstream.internal:8080",
+        )
+
+        resp = client.get("/admin", headers={"host": "proxy.local"}, follow_redirects=False)
+        assert resp.status_code == 302
+        assert resp.headers["location"] == "http://proxy.local/login?next=%2Fadmin"
+
+    def test_external_location_not_rewritten(self, tmp_path: Path):
+        async def redirect(req: Request):
+            return Response(
+                status_code=302,
+                headers={"location": "https://example.com/oauth/callback"},
+            )
+
+        upstream = make_upstream([
+            Route("/{path:path}", redirect, methods=["GET"]),
+            Route("/", redirect, methods=["GET"]),
+        ])
+        client, _, _ = make_proxy_with_upstream(
+            tmp_path,
+            upstream,
+            upstream_base_url="http://upstream.internal:8080",
+        )
+
+        resp = client.get("/login", headers={"host": "proxy.local"}, follow_redirects=False)
+        assert resp.headers["location"] == "https://example.com/oauth/callback"
+
+    def test_duplicate_set_cookie_headers_preserved(self, tmp_path: Path):
+        async def cookies(req: Request):
+            response = Response(status_code=200, content=b"ok")
+            response.raw_headers = [
+                (b"set-cookie", b"a=1; Path=/"),
+                (b"set-cookie", b"b=2; Path=/"),
+                (b"content-type", b"text/plain; charset=utf-8"),
+            ]
+            return response
+
+        upstream = make_upstream([
+            Route("/{path:path}", cookies, methods=["GET"]),
+            Route("/", cookies, methods=["GET"]),
+        ])
+        client, _, _ = make_proxy_with_upstream(tmp_path, upstream)
+
+        resp = client.get("/cookies")
+        cookie_headers = resp.headers.get_list("set-cookie")
+        assert cookie_headers == ["a=1; Path=/", "b=2; Path=/"]
+
+    def test_connection_declared_response_headers_stripped(self, tmp_path: Path):
+        async def resp_headers(req: Request):
+            return Response(
+                status_code=200,
+                content=b"ok",
+                headers={
+                    "Connection": "keep-alive, x-remove-me",
+                    "Keep-Alive": "timeout=5",
+                    "X-Remove-Me": "bad",
+                    "X-Keep": "good",
+                },
+            )
+
+        upstream = make_upstream([
+            Route("/{path:path}", resp_headers, methods=["GET"]),
+            Route("/", resp_headers, methods=["GET"]),
+        ])
+        client, _, _ = make_proxy_with_upstream(tmp_path, upstream)
+
+        resp = client.get("/headers")
+        assert "connection" not in resp.headers
+        assert "keep-alive" not in resp.headers
+        assert "x-remove-me" not in resp.headers
+        assert resp.headers["x-keep"] == "good"
 
 
 class TestHTTPRecording:

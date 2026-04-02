@@ -34,7 +34,7 @@ uv sync
 UPSTREAM_URL=http://localhost:8080 \
 LOG_DIR=./logs \
 CONFIG_FILE=./config.yaml \
-uv run uvicorn app.main:app --host 0.0.0.0 --port 9090
+uv run uvicorn app.main:create_app --factory --host 0.0.0.0 --port 9090
 ```
 
 ## 配置
@@ -48,13 +48,16 @@ uv run uvicorn app.main:app --host 0.0.0.0 --port 9090
 | `LOG_DIR` | `/data/logs` | 日志存储目录 |
 | `LOG_LEVEL` | `INFO` | 日志级别 |
 | `MAX_BODY_LOG_SIZE` | `10485760` | 单个 body 最大记录字节数 |
+| `PRESERVE_HOST` | `true` | 是否将客户端 `Host` 原样透传给下游 |
 | `CONFIG_FILE` | `/etc/llm-proxy/config.yaml` | 配置文件路径 |
 
 ### 配置文件 (`config.yaml`)
 
-配置文件用于设置路径过滤规则，控制哪些请求需要记录：
+配置文件用于设置路径过滤规则，并控制反向代理行为：
 
 ```yaml
+preserve_host: true
+
 recording:
   # 仅记录匹配的路径（为空则记录所有）
   include:
@@ -74,6 +77,17 @@ recording:
 1. 如果 `include` 非空 → 仅记录匹配 include 的路径
 2. 匹配 `exclude` 的路径永远不记录（优先级高于 include）
 3. 两者都为空 → 记录所有请求
+
+### 代理兼容规则
+
+为了尽量贴近 Nginx / Caddy / Traefik 等成熟反向代理，当前实现默认会：
+
+- 透传原始 `Host`（可通过 `PRESERVE_HOST=false` 关闭）
+- 补齐 `Forwarded`、`X-Forwarded-*`、`X-Real-IP`
+- 移除 hop-by-hop 头，以及 `Connection` 声明的扩展逐跳头
+- 保留原始百分号编码路径（例如 `%2F` 不会被错误解码）
+- 重写指向下游真实地址的绝对 `Location` 跳转为代理对外地址
+- 保留重复响应头，尤其是多个 `Set-Cookie`
 
 ## 数据存储
 

@@ -1,6 +1,6 @@
 [project]
 name = "llm-proxy"
-version = "0.1.0"
+version = "0.1.1"
 description = "Transparent HTTP reverse proxy for recording LLM API traffic"
 requires-python = ">=3.12"
 dependencies = [
@@ -23,4 +23,3 @@ dev = [
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
-

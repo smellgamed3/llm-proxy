@@ -55,6 +55,7 @@ class Config:
     log_dir: str = "/data/logs"
     log_level: str = "INFO"
     max_body_log_size: int = 10 * 1024 * 1024  # 10MB
+    preserve_host: bool = True
     recording_filter: RecordingFilter = field(default_factory=RecordingFilter)
 
     def __post_init__(self):
@@ -80,6 +81,14 @@ def _parse_filter_rules(raw: list | None) -> List[FilterRule]:
     return rules
 
 
+def _parse_bool(value: str | bool | None, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def load_config(config_path: str | None = None) -> Config:
     """Load configuration from environment variables + optional YAML config file."""
     cfg = Config(
@@ -89,6 +98,7 @@ def load_config(config_path: str | None = None) -> Config:
         log_dir=os.getenv("LOG_DIR", Config.log_dir),
         log_level=os.getenv("LOG_LEVEL", Config.log_level),
         max_body_log_size=int(os.getenv("MAX_BODY_LOG_SIZE", str(Config.max_body_log_size))),
+        preserve_host=_parse_bool(os.getenv("PRESERVE_HOST"), Config.preserve_host),
     )
 
     # Load YAML config file for filter rules and overrides
@@ -109,6 +119,8 @@ def load_config(config_path: str | None = None) -> Config:
             cfg.log_level = data["log_level"]
         if "max_body_log_size" in data:
             cfg.max_body_log_size = int(data["max_body_log_size"])
+        if "preserve_host" in data:
+            cfg.preserve_host = _parse_bool(data["preserve_host"], cfg.preserve_host)
 
         # Parse recording filter
         rec = data.get("recording", {})

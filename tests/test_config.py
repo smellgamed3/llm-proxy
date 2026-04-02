@@ -84,6 +84,7 @@ class TestLoadConfig:
         yaml_file.write_text(textwrap.dedent("""
             upstream_url: http://my-upstream:1234
             log_level: DEBUG
+            preserve_host: false
             recording:
               include:
                 - /v1/chat
@@ -95,6 +96,7 @@ class TestLoadConfig:
         cfg = load_config(config_path=str(yaml_file))
         assert cfg.upstream_url == "http://my-upstream:1234"
         assert cfg.log_level == "DEBUG"
+        assert cfg.preserve_host is False
         assert len(cfg.recording_filter.include) == 1
         assert cfg.recording_filter.include[0].pattern == "/v1/chat"
         assert len(cfg.recording_filter.exclude) == 2
@@ -110,3 +112,7 @@ class TestLoadConfig:
         log_dir = tmp_path / "nested" / "logs"
         cfg = Config(log_dir=str(log_dir))
         assert log_dir.exists()
+
+    def test_preserve_host_default_enabled(self):
+        cfg = Config()
+        assert cfg.preserve_host is True
