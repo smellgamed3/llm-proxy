@@ -78,6 +78,15 @@ def test_admin_status_alias(client: TestClient):
     assert "watermark_seq" in response.json()
 
 
+def test_admin_status_at_legacy_path(client: TestClient):
+    response = client.get("/api/admin/status")
+    assert response.status_code == 200
+    data = response.json()
+    assert "watermark_seq" in data
+    assert "conversation_count" in data
+    assert "template_count" in data
+
+
 def test_admin_rerun_incremental(client: TestClient):
     response = client.post("/api/admin/analyzer/rerun", json={"mode": "incremental"})
     assert response.status_code == 200
@@ -85,3 +94,26 @@ def test_admin_rerun_incremental(client: TestClient):
     assert data["status"] == "completed"
     assert data["mode"] == "incremental"
     assert data["processed"] == 1
+
+
+def test_admin_rerun_full(client: TestClient):
+    response = client.post("/api/admin/analyzer/rerun", json={"mode": "full"})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "completed"
+    assert data["mode"] == "full"
+    assert data["processed"] == 1
+
+
+def test_admin_reset(client: TestClient):
+    # First run incremental to populate some data
+    client.post("/api/admin/analyzer/rerun", json={"mode": "incremental"})
+    status_before = client.get("/api/admin/analyzer/status").json()
+    assert status_before["conversation_count"] >= 1
+
+    response = client.post("/api/admin/reset")
+    assert response.status_code == 200
+    assert "reset" in response.json()["status"]
+
+    status_after = client.get("/api/admin/analyzer/status").json()
+    assert status_after["conversation_count"] == 0

@@ -138,6 +138,55 @@ class TestListConversations:
         data = r.json()
         assert data["total"] == 1
 
+    def test_sort_by_cost_desc(self, client: TestClient, store: AnalyticsStore):
+        for i in range(1, 4):
+            store.upsert_conversation(_make_conv(i))
+        r = client.get("/api/conversations?sort=cost_usd&order=desc")
+        assert r.status_code == 200
+        items = r.json()["items"]
+        costs = [item["cost_usd"] for item in items]
+        assert costs == sorted(costs, reverse=True)
+
+    def test_sort_by_cost_asc(self, client: TestClient, store: AnalyticsStore):
+        for i in range(1, 4):
+            store.upsert_conversation(_make_conv(i))
+        r = client.get("/api/conversations?sort=cost_usd&order=asc")
+        assert r.status_code == 200
+        items = r.json()["items"]
+        costs = [item["cost_usd"] for item in items]
+        assert costs == sorted(costs)
+
+    def test_invalid_sort_field_falls_back_to_timestamp(self, client: TestClient, store: AnalyticsStore):
+        store.upsert_conversation(_make_conv(1))
+        r = client.get("/api/conversations?sort=__evil__")
+        assert r.status_code == 200  # does not crash
+
+    def test_filter_by_template_id(self, client: TestClient, store: AnalyticsStore):
+        conv = _make_conv(1)
+        conv["template_id"] = "tpl-abc"
+        store.upsert_conversation(conv)
+        store.upsert_conversation(_make_conv(2))  # no template_id
+
+        r = client.get("/api/conversations?template_id=tpl-abc")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["total"] == 1
+        assert data["items"][0]["template_id"] == "tpl-abc"
+
+    def test_fulltext_search_q(self, client: TestClient, store: AnalyticsStore):
+        conv1 = _make_conv(1)
+        conv1["user_prompt"] = "What is the capital of France?"
+        store.upsert_conversation(conv1)
+        conv2 = _make_conv(2)
+        conv2["user_prompt"] = "Tell me a joke."
+        store.upsert_conversation(conv2)
+
+        r = client.get("/api/conversations?q=France")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["total"] == 1
+        assert data["items"][0]["id"] == "conv-1"
+
 
 class TestGetConversation:
     def test_get_existing(self, client: TestClient, store: AnalyticsStore):
@@ -150,6 +199,22 @@ class TestGetConversation:
     def test_get_nonexistent_returns_404(self, client: TestClient):
         r = client.get("/api/conversations/nonexistent")
         assert r.status_code == 404
+
+    def test_tools_list_deserialized_as_list(self, client: TestClient, store: AnalyticsStore):
+        import json as _json
+        conv = _make_conv(5)
+        store.upsert_conversation(conv)
+        # Write tools_list as JSON string directly
+        with store._get_conn() as conn:
+            conn.execute(
+                "UPDATE conversations SET tools_list = ? WHERE id = ?",
+                (_json.dumps([{"name": "get_weather"}]), "conv-5"),
+            )
+        r = client.get("/api/conversations/conv-5")
+        assert r.status_code == 200
+        data = r.json()
+        assert isinstance(data["tools_list"], list)
+        assert data["tools_list"][0]["name"] == "get_weather"
 
     def test_get_raw_nonexistent_returns_404(self, client: TestClient):
         r = client.get("/api/conversations/nonexistent/raw")

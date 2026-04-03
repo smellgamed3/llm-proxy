@@ -7,7 +7,7 @@ from typing import Generator
 
 def get_analytics_db() -> Generator[sqlite3.Connection, None, None]:
     db_path = os.getenv("ANALYTICS_DB", "/data/analytics/analytics.db")
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     try:
         yield conn
@@ -17,7 +17,7 @@ def get_analytics_db() -> Generator[sqlite3.Connection, None, None]:
 
 def get_raw_db() -> Generator[sqlite3.Connection, None, None]:
     db_path = os.getenv("RAW_DB", "/data/logs/raw.db")
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     try:
         yield conn
