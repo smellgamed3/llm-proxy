@@ -6,20 +6,48 @@
   <title>Conversations — LLM Proxy Analytics</title>
   <link rel="stylesheet" href="style.css" />
 </head>
-<body>
-  <nav class="navbar">
-    <span class="brand">LLM Proxy Analytics</span>
-    <ul>
-      <li><a href="/">Overview</a></li>
-      <li><a href="/conversations.html" class="active">Conversations</a></li>
-      <li><a href="/costs.html">Costs</a></li>
-      <li><a href="/prompts.html">Prompts</a></li>
-      <li><a href="/errors.html">Errors</a></li>
-      <li><a href="/latency.html">Latency</a></li>
-      <li><a href="/models.html">Models</a></li>
-    </ul>
-  </nav>
-  <main class="container">
+<body class="app-layout">
+  <header class="app-header">
+    <div class="header-brand">
+      <span class="brand">LLM Proxy Analytics</span>
+      <span class="header-version">v0.2.1</span>
+    </div>
+  </header>
+  <aside class="app-sidebar">
+    <nav class="sidebar-nav">
+      <div class="nav-group">
+        <div class="nav-group-label">Analytics</div>
+        <a href="/" class="nav-item">
+          <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M3 14V9m6 5V5m6 9V2"/></svg>
+          Overview</a>
+        <a href="/conversations.html" class="nav-item active">
+          <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4c0-.6.4-1 1-1h12c.6 0 1 .4 1 1v7c0 .6-.4 1-1 1h-4l-2 3v-3H3c-.6 0-1-.4-1-1V4z"/></svg>
+          Conversations</a>
+        <a href="/costs.html" class="nav-item">
+          <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="7"/><path d="M9 5v8M7 7h3a1.5 1.5 0 010 3H7m0 0h3.5a1.5 1.5 0 010 3H7"/></svg>
+          Costs</a>
+        <a href="/models.html" class="nav-item">
+          <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2L3 5.5v7L9 16l6-3.5v-7L9 2zM3 5.5L9 9m0 0v7m0-7l6-3.5"/></svg>
+          Models</a>
+      </div>
+      <div class="nav-group">
+        <div class="nav-group-label">Monitoring</div>
+        <a href="/errors.html" class="nav-item">
+          <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3L2 15h14L9 3z"/><path d="M9 8v3"/><circle cx="9" cy="13" r=".5" fill="currentColor"/></svg>
+          Errors</a>
+        <a href="/latency.html" class="nav-item">
+          <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="7"/><path d="M9 5v4l2.5 1.5"/></svg>
+          Latency</a>
+      </div>
+      <div class="nav-group">
+        <div class="nav-group-label">Content</div>
+        <a href="/prompts.html" class="nav-item">
+          <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 2h6l4 4v10c0 .6-.4 1-1 1H5c-.6 0-1-.4-1-1V3c0-.6.4-1 1-1z"/><path d="M11 2v4h4M7 10h4m-4 3h4"/></svg>
+          Prompts</a>
+      </div>
+    </nav>
+  </aside>
+  <main class="app-content">
     <h1>Conversations</h1>
 
     <section class="filters filters-advanced">
@@ -98,94 +126,74 @@
 
     <div class="pagination" id="pagination"></div>
 
-    <section class="detail-panel" id="conversation-detail" hidden>
-      <div class="detail-header">
-        <h2>Conversation Detail</h2>
-        <button type="button" class="detail-close" onclick="hideConversationDetail()">Close</button>
-      </div>
+    <!-- Modal overlay for conversation detail -->
+    <div class="modal-overlay" id="conv-modal-overlay" hidden>
+      <div class="modal-dialog" id="conv-modal-dialog">
+        <div class="modal-header">
+          <h2>对话详情</h2>
+          <button type="button" class="modal-close" onclick="hideConversationDetail()">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="detail-meta" id="detail-meta"></div>
 
-      <div class="detail-meta" id="detail-meta"></div>
+          <!-- Rating & Tags row -->
+          <div class="detail-inline-row">
+            <div class="detail-rating-row">
+              <strong>Rating:</strong>
+              <span id="detail-rating"></span>
+            </div>
+            <div class="detail-tags-row">
+              <strong>Tags:</strong>
+              <span id="detail-tags"></span>
+            </div>
+          </div>
 
-      <!-- Rating -->
-      <div class="detail-rating-row">
-        <strong>Rating:</strong>
-        <span id="detail-rating"></span>
-      </div>
+          <div class="token-breakdown" id="token-breakdown">
+            <h3>Token &amp; 体积统计</h3>
+            <!-- Chart 1: Request/Response with cache breakdown -->
+            <div class="breakdown-chart" id="breakdown-chart-io"></div>
+            <!-- Chart 2: Content composition -->
+            <div class="breakdown-chart" id="breakdown-chart-composition"></div>
+          </div>
 
-      <!-- Tags -->
-      <div class="detail-tags-row">
-        <strong>Tags:</strong>
-        <span id="detail-tags"></span>
-      </div>
+          <!-- Collapsible sections container -->
+          <div class="collapsible-sections" id="detail-sections"></div>
 
-      <div class="token-breakdown" id="token-breakdown">
-        <h3>Token Breakdown</h3>
-        <div class="stacked-bar">
-          <div class="bar-prompt" id="bar-prompt"></div>
-          <div class="bar-completion" id="bar-completion"></div>
-        </div>
-        <div class="token-breakdown-meta" id="token-breakdown-meta"></div>
-      </div>
-
-      <div class="detail-grid">
-        <div class="detail-full-width">
-          <h3>Messages Timeline</h3>
-          <div class="chat-bubbles" id="detail-chat-bubbles"></div>
-        </div>
-      </div>
-
-      <div class="detail-grid">
-        <div>
-          <h3>System Prompt</h3>
-          <div class="detail-actions"><button data-copy-target="detail-system-prompt">Copy</button></div>
-          <pre id="detail-system-prompt"></pre>
-        </div>
-        <div>
-          <h3>Prompt Optimization Hints</h3>
-          <ul class="analysis-list" id="detail-analysis"></ul>
-        </div>
-        <div>
-          <h3>Tool Calls</h3>
-          <pre id="detail-tools-list"></pre>
-        </div>
-      </div>
-
-      <details class="raw-details">
-        <summary>Raw Request / Response</summary>
-        <div class="detail-grid two-column-raw">
-        <div>
-          <h3>User Prompt</h3>
-          <div class="detail-actions"><button data-copy-target="detail-user-prompt">Copy</button></div>
-          <pre id="detail-user-prompt"></pre>
-        </div>
-        <div>
-          <h3>Assistant Response</h3>
-          <div class="detail-actions"><button data-copy-target="detail-assistant-response">Copy</button></div>
-          <pre id="detail-assistant-response"></pre>
-        </div>
-        </div>
-        <div class="detail-grid two-column-raw">
-        <div>
-          <h3>Raw Request Body</h3>
-          <div class="detail-actions"><button data-copy-target="detail-request-body">Copy</button></div>
-          <pre id="detail-request-body"></pre>
-          <h3 class="subheading">Request Headers</h3>
-          <pre id="detail-request-headers"></pre>
-        </div>
-        <div>
-          <h3>Raw Response Body</h3>
-          <div class="detail-actions"><button data-copy-target="detail-response-body">Copy</button></div>
-          <pre id="detail-response-body"></pre>
-          <h3 class="subheading">Response Headers</h3>
-          <pre id="detail-response-headers"></pre>
+          <details class="raw-details">
+            <summary>原始请求 / 响应</summary>
+            <div class="detail-grid two-column-raw">
+              <div>
+                <h3>Raw Request Body</h3>
+                <div class="detail-actions"><button data-copy-target="detail-request-body">Copy</button></div>
+                <pre id="detail-request-body"></pre>
+                <h3 class="subheading">Request Headers</h3>
+                <pre id="detail-request-headers"></pre>
+              </div>
+              <div>
+                <h3>Raw Response Body</h3>
+                <div class="detail-actions"><button data-copy-target="detail-response-body">Copy</button></div>
+                <pre id="detail-response-body"></pre>
+                <h3 class="subheading">Response Headers</h3>
+                <pre id="detail-response-headers"></pre>
+              </div>
+            </div>
+          </details>
         </div>
       </div>
-      </details>
-    </section>
+    </div>
   </main>
   <script src="app.js"></script>
   <script>
     window.addEventListener('load', () => loadConversations(1));
+    // Close modal with ESC or click on overlay background
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !document.getElementById('conv-modal-overlay').hidden) {
+        hideConversationDetail();
+      }
+    });
+    document.getElementById('conv-modal-overlay').addEventListener('click', (e) => {
+      if (e.target === e.currentTarget) hideConversationDetail();
+    });
   </script>
 </body>
 </html>

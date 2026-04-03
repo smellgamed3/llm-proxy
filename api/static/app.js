@@ -322,7 +322,13 @@ function extractUsageFromResponseBody(responseBody) {
     const completion = usage.completion_tokens ?? usage.output_tokens ?? null;
     const total = usage.total_tokens ?? ((prompt != null && completion != null) ? (prompt + completion) : null);
     if (prompt == null && completion == null && total == null) return null;
-    return { prompt, completion, total };
+    // Extract cache tokens
+    const cacheRead = usage.prompt_cache_read_tokens ?? usage.cache_read_input_tokens
+      ?? usage.prompt_tokens_details?.cached_tokens ?? null;
+    const cacheCreation = usage.prompt_cache_creation_tokens ?? usage.cache_creation_input_tokens ?? null;
+    // Extract reasoning tokens
+    const reasoning = usage.reasoning_tokens ?? usage.completion_tokens_details?.reasoning_tokens ?? null;
+    return { prompt, completion, total, cacheRead, cacheCreation, reasoning };
   };
 
   const parsed = parseField(responseBody);
@@ -340,6 +346,22 @@ function extractUsageFromResponseBody(responseBody) {
   }
 
   return null;
+}
+
+function extractFullToolDefinitions(requestBody) {
+  const parsed = parseField(requestBody);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
+  const tools = parsed.tools || parsed.functions;
+  if (!Array.isArray(tools) || tools.length === 0) return [];
+  return tools.map((tool) => {
+    if (tool && typeof tool === 'object') {
+      if (tool.function && typeof tool.function === 'object') {
+        return tool.function;
+      }
+      return tool;
+    }
+    return { name: 'unknown' };
+  });
 }
 
 function extractToolsFromRequestBody(requestBody) {
@@ -478,15 +500,31 @@ async function showConversationDetail(conversationId) {
     const fallbackUsage = extractUsageFromResponseBody(raw.response_body);
     const fallbackTools = extractToolsFromRequestBody(raw.request_body);
 
-    const resolvedSystemPrompt = detail.system_prompt || fallbackPrompts.systemPrompt || '—';
-    const resolvedUserPrompt = detail.user_prompt || fallbackPrompts.userPrompt || '—';
-    const resolvedAssistant = detail.assistant_response || fallbackAssistant || '—';
+    const resolvedSystemPrompt = detail.system_prompt || fallbackPrompts.systemPrompt || '';
+    const resolvedUserPrompt = detail.user_prompt || fallbackPrompts.userPrompt || '';
+    const resolvedAssistant = detail.assistant_response || fallbackAssistant || '';
 
     const resolvedPromptTokens = detail.prompt_tokens ?? fallbackUsage?.prompt ?? null;
     const resolvedCompletionTokens = detail.completion_tokens ?? fallbackUsage?.completion ?? null;
     const resolvedTotalTokens = detail.total_tokens ?? fallbackUsage?.total ?? null;
 
-    document.getElementById('conversation-detail').hidden = false;
+    // Extract extended usage info
+    const extUsage = fallbackUsage || {};
+    const cacheReadTokens = extUsage.cacheRead ?? null;
+    const cacheCreationTokens = extUsage.cacheCreation ?? null;
+    const reasoningTokens = extUsage.reasoning ?? null;
+
+    // Extract request/response body sizes
+    const reqBodySize = raw.request_body_size ?? (raw.request_body ? new Blob([raw.request_body]).size : null);
+    const resBodySize = raw.response_body_size ?? (raw.response_body ? new Blob([raw.response_body]).size : null);
+
+    // Extract full tool definitions for parameter display
+    const fullToolDefs = extractFullToolDefinitions(raw.request_body);
+
+    // Show the modal
+    document.getElementById('conv-modal-overlay').hidden = false;
+    document.body.style.overflow = 'hidden';
+
     document.getElementById('detail-meta').innerHTML = `
       <span><strong>ID:</strong> ${detail.id}</span>
       <span><strong>Provider:</strong> ${detail.provider || '—'}</span>
@@ -519,48 +557,48 @@ async function showConversationDetail(conversationId) {
       ).join('') +
         `<input type="text" class="tag-input" id="tag-input-${detail.id}" placeholder="Add tag…" onkeydown="if(event.key==='Enter')addConversationTag('${detail.id}')" />`;
     }
-    document.getElementById('detail-system-prompt').textContent = resolvedSystemPrompt;
-    document.getElementById('detail-user-prompt').textContent = resolvedUserPrompt;
-    document.getElementById('detail-assistant-response').textContent = resolvedAssistant;
+
+    // Token breakdown — enhanced dual chart
+    renderTokenBreakdown({
+      promptTokens: resolvedPromptTokens,
+      completionTokens: resolvedCompletionTokens,
+      totalTokens: resolvedTotalTokens,
+      cacheReadTokens,
+      cacheCreationTokens,
+      reasoningTokens,
+      reqBodySize,
+      resBodySize,
+      resolvedSystemPrompt,
+      resolvedUserPrompt,
+      resolvedAssistant,
+      reqMessages,
+      tools: fallbackTools,
+    });
+
+    // Raw data
     document.getElementById('detail-request-body').textContent = prettyJSONOrText(raw.request_body);
     document.getElementById('detail-response-body').textContent = prettyJSONOrText(raw.response_body);
     document.getElementById('detail-request-headers').textContent = prettyJSONOrText(raw.request_headers);
     document.getElementById('detail-response-headers').textContent = prettyJSONOrText(raw.response_headers);
 
-    const tools = (Array.isArray(detail.tools_list) ? detail.tools_list : maybeJSON(detail.tools_list)) || fallbackTools;
-    document.getElementById('detail-tools-list').textContent = tools && tools.length
-      ? JSON.stringify(tools, null, 2)
-      : 'No tool calls detected';
-
-    const promptTokens = Number(resolvedPromptTokens || 0);
-    const completionTokens = Number(resolvedCompletionTokens || 0);
-    const total = Math.max(promptTokens + completionTokens, 1);
-    const promptRatio = Math.max(4, Math.round((promptTokens / total) * 100));
-    const completionRatio = Math.max(4, Math.round((completionTokens / total) * 100));
-    document.getElementById('bar-prompt').style.width = `${promptRatio}%`;
-    document.getElementById('bar-completion').style.width = `${completionRatio}%`;
-    document.getElementById('token-breakdown-meta').textContent =
-      `Prompt ${fmt(promptTokens)} (${promptRatio}%) · Completion ${fmt(completionTokens)} (${completionRatio}%) · Total ${fmt(resolvedTotalTokens)}`;
-
-    const analysisEl = document.getElementById('detail-analysis');
-    if (analysisEl) {
-      analysisEl.innerHTML = promptOptimizationHints({
-        ...detail,
-        system_prompt: resolvedSystemPrompt,
-        user_prompt: resolvedUserPrompt,
-        assistant_response: resolvedAssistant,
-        prompt_tokens: resolvedPromptTokens,
-        completion_tokens: resolvedCompletionTokens,
-        total_tokens: resolvedTotalTokens,
-      })
-        .map((text) => `<li>${text}</li>`)
-        .join('');
-    }
-
-    // Render chat bubbles
-    const bubblesEl = document.getElementById('detail-chat-bubbles');
-    if (bubblesEl) {
-      renderChatBubbles(bubblesEl, reqMessages, resolvedAssistant);
+    // Build collapsible sections
+    const sectionsEl = document.getElementById('detail-sections');
+    if (sectionsEl) {
+      sectionsEl.innerHTML = buildCollapsibleSections({
+        detail,
+        reqMessages,
+        resolvedSystemPrompt,
+        resolvedUserPrompt,
+        resolvedAssistant,
+        resolvedPromptTokens,
+        resolvedCompletionTokens,
+        resolvedTotalTokens,
+        fallbackTools,
+        fullToolDefs,
+        reqBodySize,
+        resBodySize,
+        reasoningTokens,
+      });
     }
 
     document.querySelectorAll('.conversation-row').forEach((row) => {
@@ -571,9 +609,444 @@ async function showConversationDetail(conversationId) {
   }
 }
 
+function formatBytes(bytes) {
+  if (bytes == null) return '—';
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / 1048576).toFixed(2) + ' MB';
+}
+
+function toggleToolParams(cardId, event) {
+  if (event) event.stopPropagation();
+  const panel = document.getElementById(cardId);
+  const arrow = document.getElementById(cardId + '-arrow');
+  if (!panel) return;
+  const show = panel.hidden;
+  panel.hidden = !show;
+  if (arrow) arrow.textContent = show ? '▼' : '▶';
+  // Toggle full-width class on the card
+  const card = panel.closest('.tool-card');
+  if (card) card.classList.toggle('tool-card-expanded', show);
+}
+
+function renderTokenBreakdown(info) {
+  const {
+    promptTokens: pt, completionTokens: ct, totalTokens: tt,
+    cacheReadTokens, cacheCreationTokens, reasoningTokens,
+    reqBodySize, resBodySize,
+    resolvedSystemPrompt, resolvedUserPrompt, resolvedAssistant,
+    reqMessages, tools,
+  } = info;
+  const promptTokens = Number(pt || 0);
+  const completionTokens = Number(ct || 0);
+  const totalTokens = Number(tt || promptTokens + completionTokens);
+  const cacheRead = Number(cacheReadTokens || 0);
+  const cacheCreation = Number(cacheCreationTokens || 0);
+  const reasoning = Number(reasoningTokens || 0);
+
+  // === Chart 1: Request vs Response with cache breakdown ===
+  const chart1El = document.getElementById('breakdown-chart-io');
+  if (chart1El) {
+    const hasTokenData = promptTokens > 0 || completionTokens > 0;
+
+    if (!hasTokenData) {
+      // No token data — show sizes only
+      const sizeParts = [];
+      if (reqBodySize != null) sizeParts.push(`请求体: ${formatBytes(reqBodySize)}`);
+      if (resBodySize != null) sizeParts.push(`响应体: ${formatBytes(resBodySize)}`);
+      chart1El.innerHTML = `<div class="breakdown-label">输入 / 输出 Token 分布</div>
+        <div class="breakdown-empty">Token 数据不可用（模型未返回 usage 信息）</div>
+        ${sizeParts.length > 0 ? `<div class="breakdown-meta">${sizeParts.join(' · ')}</div>` : ''}`;
+    } else {
+      const nonCachedPrompt = Math.max(0, promptTokens - cacheRead - cacheCreation);
+      const normalCompletion = Math.max(0, completionTokens - reasoning);
+      // Use max of both for relative scaling
+      const scaleMax = Math.max(promptTokens, completionTokens, 1);
+
+      let html = '<div class="breakdown-label">输入 / 输出 Token 分布</div>';
+      // Prompt bar
+      const pBarWidth = (promptTokens / scaleMax) * 100;
+      html += `<div class="breakdown-row">`;
+      html += `<span class="breakdown-row-label">Prompt <strong>${fmt(promptTokens)}</strong></span>`;
+      html += `<div class="breakdown-bar-container">`;
+      if (promptTokens > 0) {
+        if (cacheRead > 0) {
+          const w = Math.max(2, (cacheRead / scaleMax) * 100);
+          html += `<div class="breakdown-bar-seg bar-cache-read" style="width:${w}%" title="Cache Read: ${fmt(cacheRead)}"></div>`;
+        }
+        if (cacheCreation > 0) {
+          const w = Math.max(2, (cacheCreation / scaleMax) * 100);
+          html += `<div class="breakdown-bar-seg bar-cache-write" style="width:${w}%" title="Cache Creation: ${fmt(cacheCreation)}"></div>`;
+        }
+        if (nonCachedPrompt > 0) {
+          const w = Math.max(2, (nonCachedPrompt / scaleMax) * 100);
+          html += `<div class="breakdown-bar-seg bar-prompt-normal" style="width:${w}%" title="Non-cached: ${fmt(nonCachedPrompt)}"></div>`;
+        }
+      }
+      html += `</div></div>`;
+
+      // Completion bar
+      html += `<div class="breakdown-row">`;
+      html += `<span class="breakdown-row-label">Completion <strong>${fmt(completionTokens)}</strong></span>`;
+      html += `<div class="breakdown-bar-container">`;
+      if (completionTokens > 0) {
+        if (reasoning > 0) {
+          const w = Math.max(2, (reasoning / scaleMax) * 100);
+          html += `<div class="breakdown-bar-seg bar-reasoning" style="width:${w}%" title="Reasoning: ${fmt(reasoning)}"></div>`;
+        }
+        if (normalCompletion > 0) {
+          const w = Math.max(2, (normalCompletion / scaleMax) * 100);
+          html += `<div class="breakdown-bar-seg bar-completion-normal" style="width:${w}%" title="Output: ${fmt(normalCompletion)}"></div>`;
+        }
+      }
+      html += `</div></div>`;
+
+      // Meta line
+      const metaParts = [`Total: ${fmt(totalTokens)}`];
+      if (cacheRead > 0) metaParts.push(`Cache Hit: ${fmt(cacheRead)} (${((cacheRead / promptTokens) * 100).toFixed(0)}%)`);
+      if (cacheCreation > 0) metaParts.push(`Cache Write: ${fmt(cacheCreation)}`);
+      if (reasoning > 0) metaParts.push(`Reasoning: ${fmt(reasoning)} (${((reasoning / completionTokens) * 100).toFixed(0)}%)`);
+      if (reqBodySize != null) metaParts.push(`Req: ${formatBytes(reqBodySize)}`);
+      if (resBodySize != null) metaParts.push(`Res: ${formatBytes(resBodySize)}`);
+      html += `<div class="breakdown-meta">${metaParts.join(' · ')}</div>`;
+
+      // Legend
+      html += `<div class="breakdown-legend">`;
+      if (cacheRead > 0) html += `<span class="legend-item"><span class="legend-dot bar-cache-read"></span>Cache Read</span>`;
+      if (cacheCreation > 0) html += `<span class="legend-item"><span class="legend-dot bar-cache-write"></span>Cache Write</span>`;
+      html += `<span class="legend-item"><span class="legend-dot bar-prompt-normal"></span>Prompt</span>`;
+      if (reasoning > 0) html += `<span class="legend-item"><span class="legend-dot bar-reasoning"></span>Reasoning</span>`;
+      html += `<span class="legend-item"><span class="legend-dot bar-completion-normal"></span>Completion</span>`;
+      html += `</div>`;
+
+      chart1El.innerHTML = html;
+    }
+  }
+
+  // === Chart 2: Content composition breakdown ===
+  const chart2El = document.getElementById('breakdown-chart-composition');
+  if (chart2El) {
+    // Estimate char-based proportions from known content
+    const systemLen = (resolvedSystemPrompt || '').length;
+    const userLen = (resolvedUserPrompt || '').length;
+    const assistantLen = (resolvedAssistant || '').length;
+
+    // Estimate history messages length
+    let historyLen = 0;
+    let toolMsgLen = 0;
+    if (Array.isArray(reqMessages)) {
+      let lastUserIdx = -1;
+      for (let i = reqMessages.length - 1; i >= 0; i--) {
+        if (reqMessages[i] && reqMessages[i].role === 'user') { lastUserIdx = i; break; }
+      }
+      reqMessages.forEach((msg, idx) => {
+        if (!msg) return;
+        const content = normalizeMessageContent(msg.content) || '';
+        if (msg.role === 'system') return; // counted separately
+        if (msg.role === 'tool' || (msg.role === 'assistant' && msg.tool_calls)) {
+          toolMsgLen += content.length;
+          if (msg.tool_calls) toolMsgLen += JSON.stringify(msg.tool_calls).length;
+          return;
+        }
+        if (idx === lastUserIdx) return; // counted separately
+        historyLen += content.length;
+      });
+    }
+
+    // Estimate tool definitions size
+    let toolDefsLen = 0;
+    if (tools && tools.length > 0) {
+      toolDefsLen = JSON.stringify(tools).length;
+    }
+
+    const segments = [];
+    if (systemLen > 0) segments.push({ label: 'System Prompt', value: systemLen, cls: 'comp-system' });
+    if (toolDefsLen > 0) segments.push({ label: 'Tool 定义', value: toolDefsLen, cls: 'comp-tools' });
+    if (toolMsgLen > 0) segments.push({ label: 'Tool 交互', value: toolMsgLen, cls: 'comp-tool-msg' });
+    if (historyLen > 0) segments.push({ label: '历史消息', value: historyLen, cls: 'comp-history' });
+    if (userLen > 0) segments.push({ label: 'User Prompt', value: userLen, cls: 'comp-user' });
+    if (assistantLen > 0) segments.push({ label: 'Assistant', value: assistantLen, cls: 'comp-assistant' });
+
+    const totalChars = segments.reduce((s, seg) => s + seg.value, 0);
+    if (totalChars === 0) {
+      chart2El.innerHTML = '';
+      return;
+    }
+
+    let html = '<div class="breakdown-label">内容构成分布（按字符估算）</div>';
+    html += `<div class="composition-bar">`;
+    segments.forEach(seg => {
+      const pct = Math.max(1.5, (seg.value / totalChars) * 100);
+      html += `<div class="composition-seg ${seg.cls}" style="width:${pct}%" title="${seg.label}: ${fmt(seg.value)} chars (${((seg.value / totalChars) * 100).toFixed(1)}%)"></div>`;
+    });
+    html += `</div>`;
+
+    // Detail rows
+    html += `<div class="composition-details">`;
+    segments.forEach(seg => {
+      const pct = ((seg.value / totalChars) * 100).toFixed(1);
+      html += `<div class="composition-row">
+        <span class="legend-dot ${seg.cls}"></span>
+        <span class="composition-name">${seg.label}</span>
+        <span class="composition-value">${fmt(seg.value)} chars</span>
+        <span class="composition-pct">${pct}%</span>
+        <div class="composition-minibar"><div class="${seg.cls}" style="width:${pct}%"></div></div>
+      </div>`;
+    });
+    html += `</div>`;
+
+    chart2El.innerHTML = html;
+  }
+}
+
+function buildCollapsibleSections(ctx) {
+  const { detail, reqMessages, resolvedSystemPrompt, resolvedUserPrompt, resolvedAssistant,
+    resolvedPromptTokens, resolvedCompletionTokens, resolvedTotalTokens, fallbackTools,
+    fullToolDefs, reqBodySize, resBodySize, reasoningTokens } = ctx;
+
+  const sections = [];
+
+  // 1. System Prompt section
+  if (resolvedSystemPrompt) {
+    sections.push(buildSection({
+      id: 'section-system',
+      icon: '⚙️',
+      iconClass: 'section-icon-system',
+      title: 'System Prompt',
+      badge: resolvedSystemPrompt.length > 0 ? `${resolvedSystemPrompt.length} chars` : null,
+      contentHTML: `<button class="section-copy-btn" onclick="copySectionText('section-system-pre')">Copy</button>
+        <pre id="section-system-pre">${escapeHtml(resolvedSystemPrompt)}</pre>`,
+      defaultOpen: false,
+    }));
+  }
+
+  // 2. Tools section — with click-to-expand parameter details
+  const tools = (Array.isArray(detail.tools_list) ? detail.tools_list : maybeJSON(detail.tools_list)) || fallbackTools;
+  const toolDefsArr = fullToolDefs || [];
+  const hasToolMsgs = Array.isArray(reqMessages) && reqMessages.some(m => m && (m.role === 'tool' || (m.role === 'assistant' && m.tool_calls)));
+  if ((tools && tools.length > 0) || hasToolMsgs) {
+    let toolHTML = '';
+
+    // Overview: request/response size + reasoning info
+    const overviewParts = [];
+    if (reqBodySize != null) overviewParts.push(`请求体: ${formatBytes(reqBodySize)}`);
+    if (resBodySize != null) overviewParts.push(`响应体: ${formatBytes(resBodySize)}`);
+    if (reasoningTokens != null) overviewParts.push(`推理 Tokens: ${fmt(reasoningTokens)}`);
+    if (overviewParts.length > 0) {
+      toolHTML += `<div class="section-overview-bar">${overviewParts.map(p => `<span>${p}</span>`).join('')}</div>`;
+    }
+
+    // Tool definition cards with expandable parameters
+    if (toolDefsArr.length > 0) {
+      toolHTML += `<div class="tools-grid">${toolDefsArr.map((td, idx) => {
+        const name = td.name || 'unknown';
+        const desc = td.description || '';
+        const params = td.parameters;
+        const hasParams = params && typeof params === 'object' && params.properties && Object.keys(params.properties).length > 0;
+        const cardId = 'tool-detail-' + idx;
+        let paramHTML = '';
+        if (hasParams) {
+          const props = params.properties;
+          const required = params.required || [];
+          paramHTML = `<div class="tool-params-panel" id="${cardId}" hidden>
+            <table class="tool-params-table">
+              <thead><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr></thead>
+              <tbody>${Object.entries(props).map(([pName, pDef]) => {
+                const pType = pDef.type || (pDef.enum ? 'enum' : '—');
+                const pReq = required.includes(pName) ? '✓' : '';
+                const pDesc = pDef.description || '';
+                const enumVals = pDef.enum ? ` [${pDef.enum.join(', ')}]` : '';
+                return `<tr>
+                  <td><code>${escapeHtml(pName)}</code></td>
+                  <td>${escapeHtml(pType)}${enumVals ? `<span class="param-enum">${escapeHtml(enumVals)}</span>` : ''}</td>
+                  <td class="param-req">${pReq}</td>
+                  <td>${escapeHtml(truncateText(pDesc, 120))}</td>
+                </tr>`;
+              }).join('')}</tbody>
+            </table>
+          </div>`;
+        }
+        return `<div class="tool-card${hasParams ? ' tool-card-expandable' : ''}"${hasParams ? ` onclick="toggleToolParams('${cardId}', event)"` : ''}>
+          <div class="tool-card-header">
+            <div class="tool-card-name">${escapeHtml(name)}</div>
+            ${hasParams ? `<span class="tool-card-toggle" id="${cardId}-arrow">▶</span>` : ''}
+          </div>
+          ${desc ? `<div class="tool-card-desc" title="${escapeHtml(desc)}">${escapeHtml(truncateText(desc, 80))}</div>` : ''}
+          ${paramHTML}
+        </div>`;
+      }).join('')}</div>`;
+    } else if (tools && tools.length > 0) {
+      toolHTML += `<div class="tools-grid">${tools.map(t => {
+        const name = typeof t === 'string' ? t : (t?.name || t?.function?.name || 'unknown');
+        return `<div class="tool-card"><div class="tool-card-name">${escapeHtml(name)}</div></div>`;
+      }).join('')}</div>`;
+    }
+    // Tool call messages from history
+    if (Array.isArray(reqMessages)) {
+      const toolMsgs = reqMessages.filter(m => m && (m.role === 'tool' || (m.role === 'assistant' && m.tool_calls)));
+      if (toolMsgs.length > 0) {
+        toolHTML += `<h4 style="margin-top:0.75rem;font-size:0.85rem;color:#555;">Tool 交互记录</h4>`;
+        toolHTML += `<div class="history-messages">`;
+        toolMsgs.forEach(msg => {
+          if (msg.role === 'assistant' && msg.tool_calls) {
+            const calls = msg.tool_calls.map(tc => tc?.function?.name || tc?.name || 'unknown').join(', ');
+            toolHTML += `<div class="history-msg history-msg-tool"><div class="history-msg-header">Tool Calls</div><div class="history-msg-content">${escapeHtml(calls)}</div></div>`;
+          }
+          if (msg.role === 'tool') {
+            const content = normalizeMessageContent(msg.content) || '';
+            const displayContent = content.length > 500 ? content.slice(0, 500) + '…' : content;
+            toolHTML += `<div class="history-msg history-msg-tool"><div class="history-msg-header">Tool Result${msg.name ? ' (' + escapeHtml(msg.name) + ')' : ''}</div><div class="history-msg-content">${escapeHtml(displayContent)}</div></div>`;
+          }
+        });
+        toolHTML += `</div>`;
+      }
+    }
+    sections.push(buildSection({
+      id: 'section-tools',
+      icon: '🔧',
+      iconClass: 'section-icon-tools',
+      title: 'Tools',
+      badge: tools ? `${tools.length} tools` : null,
+      contentHTML: toolHTML,
+      defaultOpen: false,
+    }));
+  }
+
+  // 3. History section (all messages except last user & system)
+  if (Array.isArray(reqMessages) && reqMessages.length > 0) {
+    const { historyMessages, lastUserMessage } = categorizeMessages(reqMessages);
+    if (historyMessages.length > 0) {
+      let histHTML = `<div class="history-messages">`;
+      historyMessages.forEach(msg => {
+        const role = msg.role || 'unknown';
+        const content = normalizeMessageContent(msg.content);
+        if (!content && !(msg.tool_calls)) return;
+        const roleClass = `history-msg-${role === 'user' ? 'user' : role === 'assistant' ? 'assistant' : role === 'tool' ? 'tool' : 'system'}`;
+        const roleLabel = role.charAt(0).toUpperCase() + role.slice(1);
+        if (content) {
+          const displayContent = content.length > 800 ? content.slice(0, 800) + '…' : content;
+          histHTML += `<div class="history-msg ${roleClass}"><div class="history-msg-header">${escapeHtml(roleLabel)}</div><div class="history-msg-content">${escapeHtml(displayContent)}</div></div>`;
+        }
+      });
+      histHTML += `</div>`;
+      sections.push(buildSection({
+        id: 'section-history',
+        icon: '💬',
+        iconClass: 'section-icon-history',
+        title: '历史消息',
+        badge: `${historyMessages.length} messages`,
+        contentHTML: histHTML,
+        defaultOpen: false,
+      }));
+    }
+  }
+
+  // 4. User Prompt section
+  if (resolvedUserPrompt) {
+    sections.push(buildSection({
+      id: 'section-user',
+      icon: '👤',
+      iconClass: 'section-icon-user',
+      title: 'User Prompt',
+      badge: resolvedUserPrompt.length > 0 ? `${resolvedUserPrompt.length} chars` : null,
+      contentHTML: `<button class="section-copy-btn" onclick="copySectionText('section-user-pre')">Copy</button>
+        <pre id="section-user-pre">${escapeHtml(resolvedUserPrompt)}</pre>`,
+      defaultOpen: true,
+    }));
+  }
+
+  // 5. Assistant Response section
+  if (resolvedAssistant) {
+    sections.push(buildSection({
+      id: 'section-assistant',
+      icon: '🤖',
+      iconClass: 'section-icon-assistant',
+      title: 'Assistant Response',
+      badge: resolvedAssistant.length > 0 ? `${resolvedAssistant.length} chars` : null,
+      contentHTML: `<button class="section-copy-btn" onclick="copySectionText('section-assistant-pre')">Copy</button>
+        <pre id="section-assistant-pre">${escapeHtml(resolvedAssistant)}</pre>`,
+      defaultOpen: true,
+    }));
+  }
+
+  // 6. Optimization Hints section
+  const hints = promptOptimizationHints({
+    ...detail,
+    system_prompt: resolvedSystemPrompt,
+    user_prompt: resolvedUserPrompt,
+    assistant_response: resolvedAssistant,
+    prompt_tokens: resolvedPromptTokens,
+    completion_tokens: resolvedCompletionTokens,
+    total_tokens: resolvedTotalTokens,
+  });
+  sections.push(buildSection({
+    id: 'section-hints',
+    icon: '💡',
+    iconClass: 'section-icon-hints',
+    title: '优化建议',
+    badge: null,
+    contentHTML: `<ul class="analysis-list">${hints.map(h => `<li>${h}</li>`).join('')}</ul>`,
+    defaultOpen: false,
+  }));
+
+  return sections.join('');
+}
+
+function buildSection({ id, icon, iconClass, title, badge, contentHTML, defaultOpen }) {
+  return `<details class="collapsible-section" id="${id}"${defaultOpen ? ' open' : ''}>
+    <summary class="section-summary">
+      <span class="section-icon ${iconClass}">${icon}</span>
+      <span>${escapeHtml(title)}</span>
+      ${badge ? `<span class="section-badge">${escapeHtml(badge)}</span>` : ''}
+      <span class="section-chevron">▶</span>
+    </summary>
+    <div class="section-content">${contentHTML}</div>
+  </details>`;
+}
+
+function categorizeMessages(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return { historyMessages: [], lastUserMessage: null };
+  }
+
+  // Find the last user message index
+  let lastUserIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i] && messages[i].role === 'user') {
+      lastUserIdx = i;
+      break;
+    }
+  }
+
+  const historyMessages = [];
+  let lastUserMessage = null;
+
+  messages.forEach((msg, idx) => {
+    if (!msg) return;
+    if (msg.role === 'system') return; // system shown in its own section
+    if (idx === lastUserIdx) {
+      lastUserMessage = msg;
+      return;
+    }
+    // Skip tool-related messages (shown in tools section)
+    if (msg.role === 'tool') return;
+    if (msg.role === 'assistant' && msg.tool_calls) return;
+    historyMessages.push(msg);
+  });
+
+  return { historyMessages, lastUserMessage };
+}
+
+function copySectionText(preId) {
+  const el = document.getElementById(preId);
+  if (!el) return;
+  navigator.clipboard.writeText(el.textContent || '');
+}
+
 function hideConversationDetail() {
   selectedConversationId = null;
-  document.getElementById('conversation-detail').hidden = true;
+  document.getElementById('conv-modal-overlay').hidden = true;
+  document.body.style.overflow = '';
   document.querySelectorAll('.conversation-row').forEach((row) => row.classList.remove('selected'));
 }
 
