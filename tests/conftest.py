@@ -30,14 +30,18 @@ def db_rows(recorder: Recorder, table: str, **where) -> list[dict]:
 
 
 def jsonl_bodies(recorder: Recorder) -> list[dict]:
-    """Parse all JSONL body records."""
-    if not recorder.jsonl_path.exists():
-        return []
-    return [
-        json.loads(line)
-        for line in recorder.jsonl_path.read_text().splitlines()
-        if line.strip()
-    ]
+    """Parse all JSONL body records from the bodies directory (excluding manifest)."""
+    results = []
+    bodies_dir = recorder.bodies_dir
+    if not bodies_dir.exists():
+        return results
+    for jsonl_file in sorted(bodies_dir.glob("*.jsonl")):
+        if jsonl_file.name == "manifest.jsonl":
+            continue
+        for line in jsonl_file.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                results.append(json.loads(line))
+    return results
 
 
 # ── fixtures ─────────────────────────────────────────────────────────────────
