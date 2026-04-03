@@ -128,6 +128,53 @@ class TestRecentErrors:
         r = client.get("/api/errors/recent?limit=3")
         assert len(r.json()) == 3
 
+
+class TestErrorsDaily:
+    def test_empty_returns_empty(self, store_and_client: tuple[AnalyticsStore, TestClient]):
+        _, client = store_and_client
+        r = client.get("/api/errors/daily")
+        assert r.status_code == 200
+        assert r.json() == []
+
+    def test_daily_error_counts(self, store_and_client: tuple[AnalyticsStore, TestClient]):
+        store, client = store_and_client
+        # Use timestamps within the last 30 days window
+        from datetime import datetime, timedelta, timezone
+
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+
+        _insert_conv(store, "e1", 1, f"{today}T10:00:00Z", "error", "timeout")
+        _insert_conv(store, "e2", 2, f"{today}T11:00:00Z", "error", "rate_limit")
+        _insert_conv(store, "e3", 3, f"{yesterday}T10:00:00Z", "error", "timeout")
+        r = client.get("/api/errors/daily?days=30")
+        assert r.status_code == 200
+        data = r.json()
+        assert len(data) >= 1
+
+
+class TestErrorsByType:
+    def test_empty_returns_empty(self, store_and_client: tuple[AnalyticsStore, TestClient]):
+        _, client = store_and_client
+        r = client.get("/api/errors/by-type")
+        assert r.status_code == 200
+        assert r.json() == []
+
+    def test_groups_by_error_type(self, store_and_client: tuple[AnalyticsStore, TestClient]):
+        store, client = store_and_client
+        from datetime import datetime, timezone
+
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        _insert_conv(store, "e1", 1, f"{today}T10:00:00Z", "error", "timeout")
+        _insert_conv(store, "e2", 2, f"{today}T11:00:00Z", "error", "timeout")
+        _insert_conv(store, "e3", 3, f"{today}T12:00:00Z", "error", "rate_limit")
+        r = client.get("/api/errors/by-type?days=30")
+        assert r.status_code == 200
+        data = r.json()
+        types = {d["error_type"]: d["count"] for d in data}
+        assert types.get("timeout") == 2
+        assert types.get("rate_limit") == 1
+
     def test_row_has_expected_fields(self, store_and_client: tuple[AnalyticsStore, TestClient]):
         store, client = store_and_client
         _insert_conv(store, "e1", 1, "2024-01-01T10:00:00Z", "error", "timeout")

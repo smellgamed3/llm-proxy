@@ -67,3 +67,40 @@ def get_recent_errors(
         (limit,),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+@router.get("/errors/daily")
+def get_errors_daily(
+    days: int = 30,
+    db: sqlite3.Connection = Depends(get_analytics_db),
+) -> list[dict]:
+    """Return daily error counts for chart."""
+    rows = db.execute(
+        """SELECT date(timestamp) AS date,
+                  COUNT(*) AS error_count,
+                  COUNT(DISTINCT error_type) AS error_types
+           FROM conversations
+           WHERE status != 'success' AND timestamp >= date('now', ?)
+           GROUP BY date(timestamp)
+           ORDER BY date ASC""",
+        (f"-{days} days",),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.get("/errors/by-type")
+def get_errors_by_type(
+    days: int = 30,
+    db: sqlite3.Connection = Depends(get_analytics_db),
+) -> list[dict]:
+    """Return error distribution by type for pie chart."""
+    rows = db.execute(
+        """SELECT COALESCE(error_type, 'unknown') AS error_type,
+                  COUNT(*) AS count
+           FROM conversations
+           WHERE status != 'success' AND timestamp >= date('now', ?)
+           GROUP BY error_type
+           ORDER BY count DESC LIMIT 15""",
+        (f"-{days} days",),
+    ).fetchall()
+    return [dict(r) for r in rows]

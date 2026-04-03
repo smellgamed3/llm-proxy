@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Errors — LLM Proxy Analytics</title>
   <link rel="stylesheet" href="style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 </head>
 <body>
   <nav class="navbar">
@@ -15,15 +16,29 @@
       <li><a href="/costs.html">Costs</a></li>
       <li><a href="/prompts.html">Prompts</a></li>
       <li><a href="/errors.html" class="active">Errors</a></li>
+      <li><a href="/latency.html">Latency</a></li>
+      <li><a href="/models.html">Models</a></li>
     </ul>
   </nav>
   <main class="container">
     <h1>Errors</h1>
     <div id="error-summary" class="cards"></div>
+
+    <div class="chart-grid">
+      <div class="chart-section">
+        <h3>Error Trend (30 days)</h3>
+        <canvas id="error-trend-chart"></canvas>
+      </div>
+      <div class="chart-section">
+        <h3>Error Types Distribution</h3>
+        <canvas id="error-type-chart"></canvas>
+      </div>
+    </div>
+
     <section>
       <h2>Recent Errors</h2>
       <table class="data-table">
-        <thead><tr><th>Timestamp</th><th>Model</th><th>Error Type</th><th>Status</th><th>Message</th></tr></thead>
+        <thead><tr><th>Timestamp</th><th>Model</th><th>Error Type</th><th>Status Code</th><th>Status</th><th>Message</th></tr></thead>
         <tbody id="errors-tbody"></tbody>
       </table>
     </section>

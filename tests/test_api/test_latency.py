@@ -109,3 +109,52 @@ def test_latency_by_model_sorted_by_avg_desc(store_and_client: tuple[AnalyticsSt
     items = client.get("/api/latency/by-model").json()
     avgs = [i["avg_ms"] for i in items]
     assert avgs == sorted(avgs, reverse=True)
+
+
+def test_latency_daily_empty(store_and_client: tuple[AnalyticsStore, TestClient]):
+    _, client = store_and_client
+    response = client.get("/api/latency/daily")
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_latency_daily_returns_data(store_and_client: tuple[AnalyticsStore, TestClient]):
+    store, client = store_and_client
+    ts = datetime.now(timezone.utc)
+    ts_str = ts.isoformat()
+    date_str = ts.strftime("%Y-%m-%d")
+    for i in range(3):
+        store.upsert_conversation({
+            "id": f"daily-{i}", "seq": i + 1, "timestamp": ts_str,
+            "duration_ms": 100.0 + i * 50, "status": "success", "model": "gpt-4o",
+        })
+    store.refresh_daily_stats(date_str)
+    data = client.get("/api/latency/daily?days=7").json()
+    assert len(data) >= 1
+    assert "avg_ms" in data[0]
+    assert "requests" in data[0]
+
+
+def test_latency_distribution_empty(store_and_client: tuple[AnalyticsStore, TestClient]):
+    _, client = store_and_client
+    response = client.get("/api/latency/distribution")
+    assert response.status_code == 200
+    data = response.json()
+    assert isinstance(data, list)
+    assert all(d["count"] == 0 for d in data)
+
+
+def test_latency_distribution_buckets(store_and_client: tuple[AnalyticsStore, TestClient]):
+    store, client = store_and_client
+    ts = datetime.now(timezone.utc).isoformat()
+    store.upsert_conversation({
+        "id": "dist-1", "seq": 1, "timestamp": ts,
+        "duration_ms": 50.0, "status": "success",
+    })
+    store.upsert_conversation({
+        "id": "dist-2", "seq": 2, "timestamp": ts,
+        "duration_ms": 3000.0, "status": "success",
+    })
+    data = client.get("/api/latency/distribution").json()
+    total = sum(d["count"] for d in data)
+    assert total == 2

@@ -104,3 +104,115 @@ class TestGetPromptTemplate:
         _, client = store_and_client
         r = client.get("/api/prompts/templates/no-such-template")
         assert r.status_code == 404
+
+
+class TestTemplateStats:
+    def test_stats_with_conversations(self, store_and_client: tuple[AnalyticsStore, TestClient]):
+        store, client = store_and_client
+        _insert_template(store, "tpl-1")
+        # Insert some conversations for this template
+        with store._get_conn() as conn:
+            for i in range(3):
+                conn.execute(
+                    """INSERT INTO conversations
+                       (id, seq, timestamp, template_id, status, duration_ms, cost_usd,
+                        prompt_tokens, completion_tokens, total_tokens, finish_reason)
+                       VALUES (?, ?, '2024-01-01T10:00:00Z', 'tpl-1', 'success', 100, 0.01,
+                               100, 50, 150, 'stop')""",
+                    (f"c-{i}", i + 1),
+                )
+        r = client.get("/api/prompts/templates/tpl-1/stats")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["total_conversations"] == 3
+        assert data["success_rate"] == 1.0
+        assert "quality_score" in data
+        assert 0 <= data["quality_score"] <= 100
+
+    def test_stats_nonexistent_template(self, store_and_client: tuple[AnalyticsStore, TestClient]):
+        _, client = store_and_client
+        r = client.get("/api/prompts/templates/no-such/stats")
+        assert r.status_code == 404
+
+
+class TestTemplateDaily:
+    def test_daily_trend(self, store_and_client: tuple[AnalyticsStore, TestClient]):
+        store, client = store_and_client
+        _insert_template(store, "tpl-1")
+        from datetime import datetime, timezone
+
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        with store._get_conn() as conn:
+            conn.execute(
+                f"""INSERT INTO conversations
+                   (id, seq, timestamp, template_id, status, cost_usd, duration_ms)
+                   VALUES ('c1', 1, '{today}T10:00:00Z', 'tpl-1', 'success', 0.01, 100)""",
+            )
+        r = client.get("/api/prompts/templates/tpl-1/daily?days=30")
+        assert r.status_code == 200
+        data = r.json()
+        assert isinstance(data, list)
+        assert len(data) >= 1
+
+
+class TestTemplateConversations:
+    def test_list_template_conversations(self, store_and_client: tuple[AnalyticsStore, TestClient]):
+        store, client = store_and_client
+        _insert_template(store, "tpl-1")
+        with store._get_conn() as conn:
+            for i in range(5):
+                conn.execute(
+                    """INSERT INTO conversations
+                       (id, seq, timestamp, template_id, status)
+                       VALUES (?, ?, '2024-01-01T10:00:00Z', 'tpl-1', 'success')""",
+                    (f"c-{i}", i + 1),
+                )
+        r = client.get("/api/prompts/templates/tpl-1/conversations?page_size=3")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["total"] == 5
+        assert len(data["items"]) == 3
+
+
+class TestCompareTemplates:
+    def test_compare_two_templates(self, store_and_client: tuple[AnalyticsStore, TestClient]):
+        store, client = store_and_client
+        _insert_template(store, "tpl-a", use_count=10, system_prompt="Helper A")
+        _insert_template(store, "tpl-b", use_count=5, system_prompt="Helper B")
+        # Insert conversations
+        with store._get_conn() as conn:
+            conn.execute(
+                "INSERT INTO conversations (id, seq, timestamp, template_id, status) VALUES ('ca', 1, '2024-01-01T10:00:00Z', 'tpl-a', 'success')")
+            conn.execute(
+                "INSERT INTO conversations (id, seq, timestamp, template_id, status) VALUES ('cb', 2, '2024-01-01T10:00:00Z', 'tpl-b', 'success')")
+        r = client.get("/api/prompts/compare?template_a=tpl-a&template_b=tpl-b")
+        assert r.status_code == 200
+        data = r.json()
+        assert "a" in data and "b" in data
+        assert data["a"]["template_id"] == "tpl-a"
+        assert data["b"]["template_id"] == "tpl-b"
+
+    def test_compare_nonexistent(self, store_and_client: tuple[AnalyticsStore, TestClient]):
+        store, client = store_and_client
+        _insert_template(store, "tpl-a")
+        r = client.get("/api/prompts/compare?template_a=tpl-a&template_b=no-such")
+        assert r.status_code == 404
+
+
+class TestSimilarTemplates:
+    def test_find_similar(self, store_and_client: tuple[AnalyticsStore, TestClient]):
+        store, client = store_and_client
+        _insert_template(store, "tpl-1", system_prompt="You are a helpful coding assistant that writes Python code")
+        _insert_template(store, "tpl-2", system_prompt="You are a helpful coding assistant that writes JavaScript code")
+        _insert_template(store, "tpl-3", system_prompt="Completely different prompt about cooking recipes")
+        r = client.get("/api/prompts/similar/tpl-1")
+        assert r.status_code == 200
+        data = r.json()
+        # tpl-2 should be similar, tpl-3 probably not
+        template_ids = [d["template_id"] for d in data]
+        assert "tpl-2" in template_ids
+
+    def test_similar_nonexistent(self, store_and_client: tuple[AnalyticsStore, TestClient]):
+        _, client = store_and_client
+        r = client.get("/api/prompts/similar/no-such")
+        assert r.status_code == 404

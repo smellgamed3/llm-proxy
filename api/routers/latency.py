@@ -67,3 +67,55 @@ def get_latency_by_model(
            ORDER BY avg_ms DESC""",
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+@router.get("/latency/daily")
+def get_daily_latency(
+    days: int = 30,
+    db: sqlite3.Connection = Depends(get_analytics_db),
+) -> list[dict]:
+    """Return daily average latency trend."""
+    rows = db.execute(
+        """SELECT date, AVG(avg_duration_ms) AS avg_ms,
+                  SUM(request_count) AS requests
+           FROM daily_stats
+           WHERE date >= date('now', ?)
+           GROUP BY date
+           ORDER BY date ASC""",
+        (f"-{days} days",),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.get("/latency/distribution")
+def get_latency_distribution(
+    model: str | None = None,
+    db: sqlite3.Connection = Depends(get_analytics_db),
+) -> list[dict]:
+    """Return latency distribution in buckets for histogram."""
+    where = ["duration_ms IS NOT NULL"]
+    params: list = []
+    if model:
+        where.append("model = ?")
+        params.append(model)
+    where_sql = "WHERE " + " AND ".join(where)
+
+    buckets = [0, 100, 250, 500, 1000, 2000, 5000, 10000, 30000, 60000]
+    result = []
+    for i in range(len(buckets)):
+        lo = buckets[i]
+        hi = buckets[i + 1] if i + 1 < len(buckets) else None
+        if hi is not None:
+            count = db.execute(
+                f"SELECT COUNT(*) FROM conversations {where_sql} AND duration_ms >= ? AND duration_ms < ?",
+                params + [lo, hi],
+            ).fetchone()[0]
+            label = f"{lo}-{hi}ms"
+        else:
+            count = db.execute(
+                f"SELECT COUNT(*) FROM conversations {where_sql} AND duration_ms >= ?",
+                params + [lo],
+            ).fetchone()[0]
+            label = f"{lo}ms+"
+        result.append({"bucket": label, "count": count})
+    return result

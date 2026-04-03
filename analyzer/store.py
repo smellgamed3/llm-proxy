@@ -57,6 +57,12 @@ class AnalyticsStore:
                     system_prompt       TEXT,
                     user_prompt         TEXT,
                     assistant_response  TEXT,
+                    rating              INTEGER,
+                    rating_comment      TEXT,
+                    tags                TEXT,
+                    trace_id            TEXT,
+                    parent_id           TEXT,
+                    span_name           TEXT,
                     created_at          TEXT DEFAULT (datetime('now'))
                 );
                 CREATE INDEX IF NOT EXISTS idx_conv_timestamp ON conversations(timestamp);
@@ -64,6 +70,7 @@ class AnalyticsStore:
                 CREATE INDEX IF NOT EXISTS idx_conv_status ON conversations(status);
                 CREATE INDEX IF NOT EXISTS idx_conv_template ON conversations(template_id);
                 CREATE INDEX IF NOT EXISTS idx_conv_seq ON conversations(seq);
+                CREATE INDEX IF NOT EXISTS idx_conv_trace ON conversations(trace_id);
 
                 CREATE TABLE IF NOT EXISTS prompt_templates (
                     template_id         TEXT PRIMARY KEY,
@@ -99,6 +106,32 @@ class AnalyticsStore:
                 );
                 INSERT OR IGNORE INTO watermark (id, seq, processed) VALUES (1, 0, 0);
             """)
+            # Schema migrations for new columns
+            self._migrate(conn)
+
+    def _migrate(self, conn: sqlite3.Connection) -> None:
+        """Add columns introduced in later versions (idempotent)."""
+        existing = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(conversations)").fetchall()
+        }
+        migrations = [
+            ("rating", "INTEGER"),
+            ("rating_comment", "TEXT"),
+            ("tags", "TEXT"),
+            ("trace_id", "TEXT"),
+            ("parent_id", "TEXT"),
+            ("span_name", "TEXT"),
+        ]
+        for col, col_type in migrations:
+            if col not in existing:
+                conn.execute(
+                    f"ALTER TABLE conversations ADD COLUMN {col} {col_type}"
+                )
+        if "trace_id" not in existing:
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_conv_trace ON conversations(trace_id)"
+            )
 
     def get_watermark(self) -> int:
         with self._get_conn() as conn:

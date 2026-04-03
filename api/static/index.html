@@ -16,11 +16,21 @@
       <li><a href="/costs.html">Costs</a></li>
       <li><a href="/prompts.html">Prompts</a></li>
       <li><a href="/errors.html">Errors</a></li>
+      <li><a href="/latency.html">Latency</a></li>
+      <li><a href="/models.html">Models</a></li>
     </ul>
   </nav>
 
   <main class="container">
-    <h1>Overview</h1>
+    <div class="page-header">
+      <h1>Overview</h1>
+      <div class="time-range-selector">
+        <button class="range-btn active" data-range="1">Today</button>
+        <button class="range-btn" data-range="7">7 Days</button>
+        <button class="range-btn" data-range="30">30 Days</button>
+        <button class="range-btn" data-range="90">90 Days</button>
+      </div>
+    </div>
 
     <div class="cards" id="summary-cards">
       <div class="card">
@@ -39,12 +49,31 @@
         <div class="card-value" id="avg-latency">—</div>
         <div class="card-label">Avg Latency (ms)</div>
       </div>
+      <div class="card">
+        <div class="card-value" id="total-tokens">—</div>
+        <div class="card-label">Total Tokens</div>
+      </div>
+      <div class="card">
+        <div class="card-value" id="active-models">—</div>
+        <div class="card-label">Active Models</div>
+      </div>
     </div>
 
     <section class="chart-section">
-      <h2>7-Day Trend</h2>
+      <h2>Trend</h2>
       <canvas id="trend-chart" height="80"></canvas>
     </section>
+
+    <div class="chart-grid">
+      <section class="chart-section">
+        <h2>Model Distribution</h2>
+        <canvas id="overview-model-chart" height="160"></canvas>
+      </section>
+      <section class="chart-section">
+        <h2>Token Trend</h2>
+        <canvas id="overview-token-chart" height="160"></canvas>
+      </section>
+    </div>
   </main>
 
   <script src="app.js"></script>

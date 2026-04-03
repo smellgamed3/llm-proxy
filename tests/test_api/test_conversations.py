@@ -303,3 +303,92 @@ class TestGetConversation:
         data = response.json()
         assert data["request_body"] == "request body"
         assert data["response_body"] == "response body"
+
+
+class TestRating:
+    def test_set_rating(self, client: TestClient, store: AnalyticsStore):
+        store.upsert_conversation(_make_conv(1))
+        r = client.put("/api/conversations/conv-1/rating", json={"rating": 4})
+        assert r.status_code == 200
+        assert r.json()["rating"] == 4
+        # Verify persisted
+        detail = client.get("/api/conversations/conv-1").json()
+        assert detail["rating"] == 4
+
+    def test_set_rating_with_comment(self, client: TestClient, store: AnalyticsStore):
+        store.upsert_conversation(_make_conv(1))
+        r = client.put("/api/conversations/conv-1/rating", json={"rating": 5, "comment": "great"})
+        assert r.status_code == 200
+        assert r.json()["comment"] == "great"
+
+    def test_set_rating_invalid_value(self, client: TestClient, store: AnalyticsStore):
+        store.upsert_conversation(_make_conv(1))
+        r = client.put("/api/conversations/conv-1/rating", json={"rating": 0})
+        assert r.status_code == 422
+
+    def test_set_rating_nonexistent(self, client: TestClient):
+        r = client.put("/api/conversations/no-such/rating", json={"rating": 3})
+        assert r.status_code == 404
+
+    def test_delete_rating(self, client: TestClient, store: AnalyticsStore):
+        store.upsert_conversation(_make_conv(1))
+        client.put("/api/conversations/conv-1/rating", json={"rating": 5})
+        r = client.delete("/api/conversations/conv-1/rating")
+        assert r.status_code == 200
+        detail = client.get("/api/conversations/conv-1").json()
+        assert detail["rating"] is None
+
+    def test_delete_rating_nonexistent(self, client: TestClient):
+        r = client.delete("/api/conversations/no-such/rating")
+        assert r.status_code == 404
+
+
+class TestTags:
+    def test_set_tags(self, client: TestClient, store: AnalyticsStore):
+        store.upsert_conversation(_make_conv(1))
+        r = client.put("/api/conversations/conv-1/tags", json={"tags": ["good", "fast"]})
+        assert r.status_code == 200
+        assert r.json()["tags"] == ["good", "fast"]
+
+    def test_set_tags_nonexistent(self, client: TestClient):
+        r = client.put("/api/conversations/no-such/tags", json={"tags": ["x"]})
+        assert r.status_code == 404
+
+    def test_replace_tags(self, client: TestClient, store: AnalyticsStore):
+        store.upsert_conversation(_make_conv(1))
+        client.put("/api/conversations/conv-1/tags", json={"tags": ["a", "b"]})
+        client.put("/api/conversations/conv-1/tags", json={"tags": ["c"]})
+        detail = client.get("/api/conversations/conv-1").json()
+        assert json.loads(detail["tags"]) == ["c"]
+
+
+class TestExport:
+    def test_export_jsonl(self, client: TestClient, store: AnalyticsStore):
+        for i in range(1, 4):
+            store.upsert_conversation(_make_conv(i))
+        r = client.get("/api/conversations/export?fmt=jsonl")
+        assert r.status_code == 200
+        assert "application/x-ndjson" in r.headers["content-type"]
+        lines = [l for l in r.text.strip().split("\n") if l]
+        assert len(lines) == 3
+
+    def test_export_csv(self, client: TestClient, store: AnalyticsStore):
+        for i in range(1, 4):
+            store.upsert_conversation(_make_conv(i))
+        r = client.get("/api/conversations/export?fmt=csv")
+        assert r.status_code == 200
+        assert "text/csv" in r.headers["content-type"]
+        lines = [l for l in r.text.strip().split("\n") if l]
+        assert len(lines) == 4  # header + 3 rows
+
+    def test_export_invalid_fmt(self, client: TestClient, store: AnalyticsStore):
+        r = client.get("/api/conversations/export?fmt=xml")
+        assert r.status_code == 400
+
+    def test_export_with_filter(self, client: TestClient, store: AnalyticsStore):
+        store.upsert_conversation(_make_conv(1, model="gpt-4o"))
+        store.upsert_conversation(_make_conv(2, model="claude-3"))
+        r = client.get("/api/conversations/export?fmt=jsonl&model=gpt-4o")
+        assert r.status_code == 200
+        lines = [l for l in r.text.strip().split("\n") if l]
+        assert len(lines) == 1

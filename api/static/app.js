@@ -45,11 +45,17 @@ function renderPromptCompletionPreview(row) {
 
 // ── Overview page ─────────────────────────────────────────────────────────
 
+let overviewDays = 7;
+let trendChartInstance = null;
+let modelChartInstance = null;
+let tokenChartInstance = null;
+
 async function loadOverview() {
   try {
-    const [summary, daily] = await Promise.all([
+    const [summary, daily, modelUsage] = await Promise.all([
       fetchJSON(`${API}/overview`),
-      fetchJSON(`${API}/overview/daily?days=7`),
+      fetchJSON(`${API}/overview/daily?days=${overviewDays}`),
+      fetchJSON(`${API}/models/usage`),
     ]);
 
     document.getElementById('total-requests').textContent = fmt(summary.total_requests);
@@ -59,8 +65,12 @@ async function loadOverview() {
       summary.total_cost_usd != null ? '$' + Number(summary.total_cost_usd).toFixed(4) : '—';
     document.getElementById('avg-latency').textContent =
       summary.avg_duration_ms != null ? fmt(summary.avg_duration_ms, 1) : '—';
+    document.getElementById('total-tokens').textContent = fmt(summary.total_tokens);
+    document.getElementById('active-models').textContent = fmt(modelUsage.length);
 
     renderTrendChart(daily);
+    renderOverviewModelChart(modelUsage);
+    renderOverviewTokenChart(daily);
   } catch (e) {
     console.error('Overview load error:', e);
   }
@@ -69,7 +79,8 @@ async function loadOverview() {
 function renderTrendChart(daily) {
   const ctx = document.getElementById('trend-chart');
   if (!ctx) return;
-  new Chart(ctx, {
+  if (trendChartInstance) trendChartInstance.destroy();
+  trendChartInstance = new Chart(ctx, {
     type: 'bar',
     data: {
       labels: daily.map(d => d.date),
@@ -104,6 +115,67 @@ function renderTrendChart(daily) {
         },
       },
     },
+  });
+}
+
+function renderOverviewModelChart(modelUsage) {
+  const ctx = document.getElementById('overview-model-chart');
+  if (!ctx) return;
+  if (modelChartInstance) modelChartInstance.destroy();
+  const colors = [
+    '#4f46e5', '#0ea5e9', '#10b981', '#f59e0b', '#ef4444',
+    '#8b5cf6', '#ec4899', '#06b6d4', '#84cc16', '#f97316',
+  ];
+  modelChartInstance = new Chart(ctx, {
+    type: 'doughnut',
+    data: {
+      labels: modelUsage.map(m => m.model || 'unknown'),
+      datasets: [{
+        data: modelUsage.map(m => m.request_count || 0),
+        backgroundColor: colors.slice(0, modelUsage.length),
+      }],
+    },
+    options: {
+      responsive: true,
+      plugins: {
+        legend: { position: 'right', labels: { boxWidth: 12, font: { size: 11 } } },
+      },
+    },
+  });
+}
+
+function renderOverviewTokenChart(daily) {
+  const ctx = document.getElementById('overview-token-chart');
+  if (!ctx) return;
+  if (tokenChartInstance) tokenChartInstance.destroy();
+  tokenChartInstance = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: daily.map(d => d.date),
+      datasets: [{
+        label: 'Tokens',
+        data: daily.map(d => {
+          const row = d;
+          return (row.total_tokens || 0);
+        }),
+        borderColor: '#8b5cf6',
+        backgroundColor: 'rgba(139,92,246,0.1)',
+        tension: 0.3,
+        fill: true,
+      }],
+    },
+    options: { responsive: true },
+  });
+}
+
+function initOverviewTimeRange() {
+  document.querySelectorAll('.range-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      overviewDays = parseInt(btn.dataset.range, 10);
+      loadOverview();
+    });
   });
 }
 
@@ -425,6 +497,28 @@ async function showConversationDetail(conversationId) {
       <span><strong>Latency:</strong> ${fmt(detail.duration_ms, 1)} ms</span>
       <span><strong>Cost:</strong> ${detail.cost_usd != null ? '$' + Number(detail.cost_usd).toFixed(6) : '—'}</span>
     `;
+
+    // Rating widget
+    const ratingEl = document.getElementById('detail-rating');
+    if (ratingEl) {
+      const currentRating = detail.rating || 0;
+      ratingEl.innerHTML = [1,2,3,4,5].map(i =>
+        `<span class="rating-star${i <= currentRating ? ' active' : ''}" data-rating="${i}" onclick="setConversationRating('${detail.id}', ${i})">★</span>`
+      ).join('') +
+        (currentRating ? `<button class="rating-clear" onclick="clearConversationRating('${detail.id}')">Clear</button>` : '') +
+        (detail.rating_comment ? `<span class="rating-comment">${escapeHtml(detail.rating_comment)}</span>` : '');
+    }
+
+    // Tags widget
+    const tagsEl = document.getElementById('detail-tags');
+    if (tagsEl) {
+      let tags = [];
+      try { tags = JSON.parse(detail.tags || '[]'); } catch { tags = []; }
+      tagsEl.innerHTML = tags.map(t =>
+        `<span class="tag-badge">${escapeHtml(t)} <span class="tag-remove" onclick="removeConversationTag('${detail.id}', '${escapeHtml(t)}')">&times;</span></span>`
+      ).join('') +
+        `<input type="text" class="tag-input" id="tag-input-${detail.id}" placeholder="Add tag…" onkeydown="if(event.key==='Enter')addConversationTag('${detail.id}')" />`;
+    }
     document.getElementById('detail-system-prompt').textContent = resolvedSystemPrompt;
     document.getElementById('detail-user-prompt').textContent = resolvedUserPrompt;
     document.getElementById('detail-assistant-response').textContent = resolvedAssistant;
@@ -461,6 +555,12 @@ async function showConversationDetail(conversationId) {
       })
         .map((text) => `<li>${text}</li>`)
         .join('');
+    }
+
+    // Render chat bubbles
+    const bubblesEl = document.getElementById('detail-chat-bubbles');
+    if (bubblesEl) {
+      renderChatBubbles(bubblesEl, reqMessages, resolvedAssistant);
     }
 
     document.querySelectorAll('.conversation-row').forEach((row) => {
@@ -569,32 +669,135 @@ async function loadCostsPage() {
 
 // ── Prompts page ──────────────────────────────────────────────────────────
 
+let tmplDailyChartInstance = null;
+
 async function loadPromptsPage() {
   try {
     const data = await fetchJSON(`${API}/prompts/templates?page_size=50`);
     const tbody = document.getElementById('prompts-tbody');
     if (!tbody) return;
     tbody.innerHTML = data.items.map(r => `
-      <tr>
+      <tr class="conversation-row" data-template-id="${r.template_id}">
         <td><code>${r.template_id}</code></td>
         <td>${fmt(r.use_count)}</td>
         <td>$${Number(r.avg_cost_usd || 0).toFixed(5)}</td>
+        <td>$${Number(r.total_cost_usd || 0).toFixed(5)}</td>
         <td>${r.last_seen ? r.last_seen.slice(0, 10) : '—'}</td>
         <td title="${(r.system_prompt_preview || '').replace(/"/g, '&quot;')}">${(r.system_prompt_preview || '').slice(0, 80)}${r.system_prompt_preview?.length > 80 ? '…' : ''}</td>
       </tr>
     `).join('');
+    tbody.querySelectorAll('.conversation-row').forEach(row => {
+      row.addEventListener('click', () => showTemplateDetail(row.dataset.templateId));
+    });
   } catch (e) {
     console.error('Prompts load error:', e);
   }
+}
+
+async function showTemplateDetail(templateId) {
+  try {
+    const [tmpl, stats, daily, conversations, similar] = await Promise.all([
+      fetchJSON(`${API}/prompts/templates/${templateId}`),
+      fetchJSON(`${API}/prompts/templates/${templateId}/stats`).catch(() => null),
+      fetchJSON(`${API}/prompts/templates/${templateId}/daily?days=30`).catch(() => []),
+      fetchJSON(`${API}/prompts/templates/${templateId}/conversations?page_size=20`).catch(() => ({items:[]})),
+      fetchJSON(`${API}/prompts/similar/${templateId}`).catch(() => []),
+    ]);
+
+    document.getElementById('template-detail').hidden = false;
+    document.getElementById('tmpl-detail-id').textContent = templateId;
+
+    // Stats cards
+    const cardsEl = document.getElementById('tmpl-stats-cards');
+    if (cardsEl && stats) {
+      const scoreColor = stats.quality_score >= 70 ? '#10b981' : stats.quality_score >= 40 ? '#f59e0b' : '#ef4444';
+      cardsEl.innerHTML = `
+        <div class="card"><div class="card-value" style="color:${scoreColor}">${stats.quality_score}</div><div class="card-label">Quality Score</div></div>
+        <div class="card"><div class="card-value">${fmt(stats.total_conversations)}</div><div class="card-label">Conversations</div></div>
+        <div class="card"><div class="card-value">${(stats.success_rate * 100).toFixed(1)}%</div><div class="card-label">Success Rate</div></div>
+        <div class="card"><div class="card-value">${fmt(stats.avg_duration_ms, 1)}</div><div class="card-label">Avg Latency (ms)</div></div>
+        <div class="card"><div class="card-value">$${stats.total_cost_usd.toFixed(4)}</div><div class="card-label">Total Cost</div></div>
+        <div class="card"><div class="card-value">${stats.avg_rating != null ? stats.avg_rating.toFixed(1) + ' ★' : '—'}</div><div class="card-label">Avg Rating (${stats.rated_count})</div></div>
+      `;
+    }
+
+    // System prompt
+    document.getElementById('tmpl-system-prompt').textContent = tmpl.system_prompt || '—';
+
+    // Daily chart
+    const dailyCtx = document.getElementById('tmpl-daily-chart');
+    if (dailyCtx && daily.length > 0) {
+      if (tmplDailyChartInstance) tmplDailyChartInstance.destroy();
+      tmplDailyChartInstance = new Chart(dailyCtx, {
+        type: 'bar',
+        data: {
+          labels: daily.map(d => d.date),
+          datasets: [
+            { label: 'Requests', data: daily.map(d => d.requests), backgroundColor: 'rgba(126,184,247,0.7)', yAxisID: 'y' },
+            { label: 'Cost (USD)', data: daily.map(d => d.cost_usd), type: 'line', borderColor: '#e67e22', backgroundColor: 'transparent', yAxisID: 'y1', tension: 0.3, pointRadius: 3 },
+          ],
+        },
+        options: {
+          responsive: true,
+          interaction: { mode: 'index', intersect: false },
+          scales: {
+            y: { position: 'left', title: { display: true, text: 'Requests' } },
+            y1: { position: 'right', title: { display: true, text: 'Cost' }, grid: { drawOnChartArea: false } },
+          },
+        },
+      });
+    }
+
+    // Similar templates
+    const similarEl = document.getElementById('tmpl-similar-list');
+    if (similarEl) {
+      if (similar.length === 0) {
+        similarEl.innerHTML = '<p class="muted">No similar templates found</p>';
+      } else {
+        similarEl.innerHTML = `<table class="data-table"><thead><tr><th>Template</th><th>Similarity</th><th>Uses</th><th>Avg Cost</th></tr></thead><tbody>` +
+          similar.map(s => `<tr class="conversation-row" onclick="showTemplateDetail('${escapeHtml(s.template_id)}')">
+            <td><code>${s.template_id}</code></td>
+            <td>${(s.similarity * 100).toFixed(0)}%</td>
+            <td>${fmt(s.use_count)}</td>
+            <td>$${Number(s.avg_cost_usd || 0).toFixed(5)}</td>
+          </tr>`).join('') + `</tbody></table>`;
+      }
+    }
+
+    // Conversations table
+    const convTbody = document.getElementById('tmpl-conversations-tbody');
+    if (convTbody) {
+      convTbody.innerHTML = (conversations.items || []).map(r => `
+        <tr>
+          <td>${r.timestamp ? r.timestamp.replace('T', ' ').slice(0, 19) : '—'}</td>
+          <td>${r.model || '—'}</td>
+          <td><span class="badge badge-${r.status === 'success' ? 'success' : 'error'}">${r.status}</span></td>
+          <td>${fmt(r.total_tokens)}</td>
+          <td>$${Number(r.cost_usd || 0).toFixed(5)}</td>
+          <td>${fmt(r.duration_ms, 1)}</td>
+          <td>${r.rating != null ? '★'.repeat(r.rating) : '—'}</td>
+          <td>${escapeHtml(truncateText(r.user_prompt_preview, 60))}</td>
+        </tr>
+      `).join('');
+    }
+  } catch (e) {
+    console.error('Template detail error:', e);
+  }
+}
+
+function hideTemplateDetail() {
+  document.getElementById('template-detail').hidden = true;
 }
 
 // ── Errors page ───────────────────────────────────────────────────────────
 
 async function loadErrorsPage() {
   try {
-    const [summary, recent] = await Promise.all([
+    const [summary, recent, daily, byType] = await Promise.all([
       fetchJSON(`${API}/errors/summary`),
       fetchJSON(`${API}/errors/recent?limit=50`),
+      fetchJSON(`${API}/errors/daily?days=30`).catch(() => []),
+      fetchJSON(`${API}/errors/by-type?days=30`).catch(() => []),
     ]);
 
     const summaryEl = document.getElementById('error-summary');
@@ -606,6 +809,43 @@ async function loadErrorsPage() {
       `;
     }
 
+    // Error trend chart
+    const trendCtx = document.getElementById('error-trend-chart');
+    if (trendCtx && daily.length > 0) {
+      new Chart(trendCtx, {
+        type: 'bar',
+        data: {
+          labels: daily.map(d => d.date),
+          datasets: [{
+            label: 'Errors',
+            data: daily.map(d => d.error_count),
+            backgroundColor: 'rgba(239,68,68,0.7)',
+          }],
+        },
+        options: { responsive: true },
+      });
+    }
+
+    // Error type pie chart
+    const typeCtx = document.getElementById('error-type-chart');
+    if (typeCtx && byType.length > 0) {
+      const colors = ['#ef4444','#f59e0b','#8b5cf6','#0ea5e9','#10b981','#ec4899','#f97316','#06b6d4','#84cc16','#4f46e5'];
+      new Chart(typeCtx, {
+        type: 'doughnut',
+        data: {
+          labels: byType.map(d => d.error_type),
+          datasets: [{
+            data: byType.map(d => d.count),
+            backgroundColor: colors.slice(0, byType.length),
+          }],
+        },
+        options: {
+          responsive: true,
+          plugins: { legend: { position: 'right', labels: { boxWidth: 12, font: { size: 11 } } } },
+        },
+      });
+    }
+
     const tbody = document.getElementById('errors-tbody');
     if (tbody) {
       tbody.innerHTML = recent.map(r => `
@@ -613,6 +853,7 @@ async function loadErrorsPage() {
           <td>${r.timestamp ? r.timestamp.slice(0, 19).replace('T', ' ') : '—'}</td>
           <td>${r.model || '—'}</td>
           <td>${r.error_type || '—'}</td>
+          <td>${r.status_code || '—'}</td>
           <td><span class="badge badge-error">${r.status}</span></td>
           <td>${(r.error_message || '').slice(0, 100)}</td>
         </tr>
@@ -623,11 +864,291 @@ async function loadErrorsPage() {
   }
 }
 
+// ── Chat Bubbles ──────────────────────────────────────────────────────────
+
+function renderChatBubbles(container, messages, fallbackAssistant) {
+  if (!container) return;
+  if (!Array.isArray(messages) || messages.length === 0) {
+    container.innerHTML = '<div class="chat-empty">No messages to display</div>';
+    return;
+  }
+  let html = '';
+  messages.forEach((msg) => {
+    if (!msg || typeof msg !== 'object') return;
+    const role = msg.role || 'unknown';
+    const content = normalizeMessageContent(msg.content);
+    const toolCalls = msg.tool_calls;
+    const roleClass = `chat-bubble-${role}`;
+    const roleLabel = role.charAt(0).toUpperCase() + role.slice(1);
+
+    if (content) {
+      html += `<div class="chat-bubble ${roleClass}">
+        <div class="chat-role">${escapeHtml(roleLabel)}</div>
+        <div class="chat-content">${escapeHtml(content)}</div>
+      </div>`;
+    }
+    if (Array.isArray(toolCalls) && toolCalls.length > 0) {
+      const toolNames = toolCalls.map(tc => {
+        if (tc && tc.function && tc.function.name) return tc.function.name;
+        if (tc && tc.name) return tc.name;
+        return 'unknown';
+      });
+      html += `<div class="chat-bubble chat-bubble-tool">
+        <div class="chat-role">Tool Calls</div>
+        <div class="chat-content">${escapeHtml(toolNames.join(', '))}</div>
+      </div>`;
+    }
+  });
+  // Append assistant response if not already in messages
+  const hasAssistant = messages.some(m => m && m.role === 'assistant');
+  if (!hasAssistant && fallbackAssistant && fallbackAssistant !== '—') {
+    html += `<div class="chat-bubble chat-bubble-assistant">
+      <div class="chat-role">Assistant</div>
+      <div class="chat-content">${escapeHtml(fallbackAssistant)}</div>
+    </div>`;
+  }
+  container.innerHTML = html || '<div class="chat-empty">No messages to display</div>';
+}
+
+// ── Latency page ──────────────────────────────────────────────────────────
+
+async function loadLatencyPage() {
+  try {
+    const [summary, daily, byModel, dist] = await Promise.all([
+      fetchJSON(`${API}/latency/summary`),
+      fetchJSON(`${API}/latency/daily?days=30`),
+      fetchJSON(`${API}/latency/by-model`),
+      fetchJSON(`${API}/latency/distribution`),
+    ]);
+
+    // Cards
+    document.getElementById('latency-p50').textContent = summary.p50 != null ? fmt(summary.p50, 1) : '—';
+    document.getElementById('latency-p95').textContent = summary.p95 != null ? fmt(summary.p95, 1) : '—';
+    document.getElementById('latency-p99').textContent = summary.p99 != null ? fmt(summary.p99, 1) : '—';
+    document.getElementById('latency-avg').textContent = summary.avg != null ? fmt(summary.avg, 1) : '—';
+    document.getElementById('latency-count').textContent = fmt(summary.count);
+
+    // Daily trend
+    const trendCtx = document.getElementById('latency-trend-chart');
+    if (trendCtx) {
+      new Chart(trendCtx, {
+        type: 'line',
+        data: {
+          labels: daily.map(d => d.date),
+          datasets: [{
+            label: 'Avg Latency (ms)',
+            data: daily.map(d => d.avg_ms),
+            borderColor: '#4f46e5',
+            backgroundColor: 'rgba(79,70,229,0.1)',
+            tension: 0.3,
+            fill: true,
+          }],
+        },
+        options: { responsive: true },
+      });
+    }
+
+    // By model bar chart
+    const modelCtx = document.getElementById('latency-by-model-chart');
+    if (modelCtx) {
+      const sorted = byModel.slice().sort((a, b) => (b.avg_ms || 0) - (a.avg_ms || 0));
+      new Chart(modelCtx, {
+        type: 'bar',
+        data: {
+          labels: sorted.map(m => m.model || 'unknown'),
+          datasets: [{
+            label: 'Avg Latency (ms)',
+            data: sorted.map(m => m.avg_ms),
+            backgroundColor: 'rgba(14,165,233,0.7)',
+          }],
+        },
+        options: {
+          responsive: true,
+          indexAxis: sorted.length > 6 ? 'y' : 'x',
+        },
+      });
+    }
+
+    // Distribution histogram
+    const distCtx = document.getElementById('latency-dist-chart');
+    if (distCtx) {
+      new Chart(distCtx, {
+        type: 'bar',
+        data: {
+          labels: dist.map(d => d.bucket),
+          datasets: [{
+            label: 'Requests',
+            data: dist.map(d => d.count),
+            backgroundColor: 'rgba(139,92,246,0.7)',
+          }],
+        },
+        options: { responsive: true },
+      });
+    }
+
+    // Table
+    const tbody = document.getElementById('latency-model-tbody');
+    if (tbody) {
+      tbody.innerHTML = byModel.map(r => `
+        <tr>
+          <td>${r.model || '—'}</td>
+          <td>${r.avg_ms != null ? fmt(r.avg_ms, 1) : '—'}</td>
+          <td>${fmt(r.count)}</td>
+        </tr>
+      `).join('');
+    }
+  } catch (e) {
+    console.error('Latency load error:', e);
+  }
+}
+
+// ── Rating & Tags ─────────────────────────────────────────────────────────
+
+async function setConversationRating(convId, rating) {
+  try {
+    await fetch(`${API}/conversations/${convId}/rating`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rating }),
+    });
+    showConversationDetail(convId);
+  } catch (e) { console.error('Rating error:', e); }
+}
+
+async function clearConversationRating(convId) {
+  try {
+    await fetch(`${API}/conversations/${convId}/rating`, { method: 'DELETE' });
+    showConversationDetail(convId);
+  } catch (e) { console.error('Clear rating error:', e); }
+}
+
+async function addConversationTag(convId) {
+  const input = document.getElementById(`tag-input-${convId}`);
+  if (!input || !input.value.trim()) return;
+  const newTag = input.value.trim();
+  // Get current tags from detail
+  try {
+    const detail = await fetchJSON(`${API}/conversations/${convId}`);
+    let tags = [];
+    try { tags = JSON.parse(detail.tags || '[]'); } catch { tags = []; }
+    if (!tags.includes(newTag)) tags.push(newTag);
+    await fetch(`${API}/conversations/${convId}/tags`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tags }),
+    });
+    showConversationDetail(convId);
+  } catch (e) { console.error('Add tag error:', e); }
+}
+
+async function removeConversationTag(convId, tagToRemove) {
+  try {
+    const detail = await fetchJSON(`${API}/conversations/${convId}`);
+    let tags = [];
+    try { tags = JSON.parse(detail.tags || '[]'); } catch { tags = []; }
+    tags = tags.filter(t => t !== tagToRemove);
+    await fetch(`${API}/conversations/${convId}/tags`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tags }),
+    });
+    showConversationDetail(convId);
+  } catch (e) { console.error('Remove tag error:', e); }
+}
+
+// ── Export ─────────────────────────────────────────────────────────────────
+
+function exportConversations(format) {
+  const params = collectConversationFilters();
+  params.delete('page');
+  params.delete('page_size');
+  params.set('fmt', format);
+  window.open(`${API}/conversations/export?${params}`, '_blank');
+}
+
+// ── Models page ───────────────────────────────────────────────────────────
+
+async function loadModelsPage() {
+  try {
+    const usage = await fetchJSON(`${API}/models/usage`);
+
+    const colors = [
+      '#4f46e5', '#0ea5e9', '#10b981', '#f59e0b', '#ef4444',
+      '#8b5cf6', '#ec4899', '#06b6d4', '#84cc16', '#f97316',
+    ];
+
+    // Request distribution doughnut
+    const distCtx = document.getElementById('model-dist-chart');
+    if (distCtx) {
+      new Chart(distCtx, {
+        type: 'doughnut',
+        data: {
+          labels: usage.map(m => m.model || 'unknown'),
+          datasets: [{
+            data: usage.map(m => m.request_count || 0),
+            backgroundColor: colors.slice(0, usage.length),
+          }],
+        },
+        options: {
+          responsive: true,
+          plugins: { legend: { position: 'right', labels: { boxWidth: 12, font: { size: 11 } } } },
+        },
+      });
+    }
+
+    // Cost distribution doughnut
+    const costCtx = document.getElementById('model-cost-dist-chart');
+    if (costCtx) {
+      new Chart(costCtx, {
+        type: 'doughnut',
+        data: {
+          labels: usage.map(m => m.model || 'unknown'),
+          datasets: [{
+            data: usage.map(m => m.cost_usd || 0),
+            backgroundColor: colors.slice(0, usage.length),
+          }],
+        },
+        options: {
+          responsive: true,
+          plugins: { legend: { position: 'right', labels: { boxWidth: 12, font: { size: 11 } } } },
+        },
+      });
+    }
+
+    // Table
+    const tbody = document.getElementById('model-usage-tbody');
+    if (tbody) {
+      tbody.innerHTML = usage.map(r => {
+        const total = (r.success_count || 0) + (r.error_count || 0);
+        const rate = total > 0 ? ((r.success_count || 0) / total * 100).toFixed(1) + '%' : '—';
+        return `
+          <tr>
+            <td>${r.model || '—'}</td>
+            <td>${r.provider || '—'}</td>
+            <td>${fmt(r.request_count)}</td>
+            <td>${fmt(r.success_count)}</td>
+            <td>${fmt(r.error_count)}</td>
+            <td>${rate}</td>
+            <td>${fmt(r.total_tokens)}</td>
+            <td>$${Number(r.cost_usd || 0).toFixed(5)}</td>
+            <td>${r.avg_duration_ms != null ? fmt(r.avg_duration_ms, 1) : '—'}</td>
+          </tr>
+        `;
+      }).join('');
+    }
+  } catch (e) {
+    console.error('Models load error:', e);
+  }
+}
+
 // ── Auto-detect page ──────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', () => {
   const path = window.location.pathname;
-  if (path === '/' || path.endsWith('index.html')) loadOverview();
+  if (path === '/' || path.endsWith('index.html')) {
+    initOverviewTimeRange();
+    loadOverview();
+  }
 
   const tbody = document.getElementById('conv-tbody');
   if (tbody) {

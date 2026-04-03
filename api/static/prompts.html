@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Prompts — LLM Proxy Analytics</title>
   <link rel="stylesheet" href="style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 </head>
 <body>
   <nav class="navbar">
@@ -15,14 +16,64 @@
       <li><a href="/costs.html">Costs</a></li>
       <li><a href="/prompts.html" class="active">Prompts</a></li>
       <li><a href="/errors.html">Errors</a></li>
+      <li><a href="/latency.html">Latency</a></li>
+      <li><a href="/models.html">Models</a></li>
     </ul>
   </nav>
   <main class="container">
     <h1>Prompt Templates</h1>
     <table class="data-table">
-      <thead><tr><th>Template ID</th><th>Uses</th><th>Avg Cost</th><th>Last Seen</th><th>Preview</th></tr></thead>
+      <thead><tr>
+        <th>Template ID</th><th>Uses</th><th>Avg Cost</th><th>Total Cost</th><th>Last Seen</th><th>Preview</th>
+      </tr></thead>
       <tbody id="prompts-tbody"></tbody>
     </table>
+
+    <!-- Template Detail Panel -->
+    <section class="detail-panel" id="template-detail" hidden>
+      <div class="detail-header">
+        <h2>Template Detail: <span id="tmpl-detail-id"></span></h2>
+        <button type="button" class="detail-close" onclick="hideTemplateDetail()">Close</button>
+      </div>
+
+      <!-- Quality Score & Stats Cards -->
+      <div class="cards" id="tmpl-stats-cards"></div>
+
+      <!-- Charts Row -->
+      <div class="chart-grid">
+        <div class="chart-section">
+          <h3>Daily Usage Trend</h3>
+          <canvas id="tmpl-daily-chart"></canvas>
+        </div>
+        <div class="chart-section">
+          <h3>Similar Templates</h3>
+          <div id="tmpl-similar-list"></div>
+        </div>
+      </div>
+
+      <!-- System Prompt -->
+      <div class="chart-section">
+        <h3>System Prompt</h3>
+        <pre id="tmpl-system-prompt" style="max-height:18rem;overflow:auto;white-space:pre-wrap;word-break:break-word;background:#f8f9fb;border:1px solid #e5e7eb;border-radius:6px;padding:0.9rem;font-size:0.85rem;"></pre>
+      </div>
+
+      <!-- Recent Conversations -->
+      <section>
+        <h3>Recent Conversations</h3>
+        <table class="data-table">
+          <thead><tr>
+            <th>Timestamp</th><th>Model</th><th>Status</th><th>Tokens</th><th>Cost</th><th>Latency</th><th>Rating</th><th>Preview</th>
+          </tr></thead>
+          <tbody id="tmpl-conversations-tbody"></tbody>
+        </table>
+      </section>
+
+      <!-- Compare Section -->
+      <section class="chart-section" style="margin-top:1.5rem" id="tmpl-compare-section" hidden>
+        <h3>Template Comparison</h3>
+        <div class="compare-grid" id="tmpl-compare-result"></div>
+      </section>
+    </section>
   </main>
   <script src="app.js"></script>
   <script>window.addEventListener('load', loadPromptsPage);</script>

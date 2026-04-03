@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Models — LLM Proxy Analytics</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <nav class="navbar">
+    <span class="brand">LLM Proxy Analytics</span>
+    <ul>
+      <li><a href="/">Overview</a></li>
+      <li><a href="/conversations.html">Conversations</a></li>
+      <li><a href="/costs.html">Costs</a></li>
+      <li><a href="/prompts.html">Prompts</a></li>
+      <li><a href="/errors.html">Errors</a></li>
+      <li><a href="/latency.html">Latency</a></li>
+      <li><a href="/models.html" class="active">Models</a></li>
+    </ul>
+  </nav>
+  <main class="container">
+    <h1>Model Analysis</h1>
+
+    <div class="chart-grid">
+      <section class="chart-section">
+        <h2>Request Distribution</h2>
+        <canvas id="model-dist-chart" height="160"></canvas>
+      </section>
+      <section class="chart-section">
+        <h2>Cost Distribution</h2>
+        <canvas id="model-cost-dist-chart" height="160"></canvas>
+      </section>
+    </div>
+
+    <section>
+      <h2>Model Comparison</h2>
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Model</th>
+            <th>Provider</th>
+            <th>Requests</th>
+            <th>Success</th>
+            <th>Errors</th>
+            <th>Success Rate</th>
+            <th>Total Tokens</th>
+            <th>Cost (USD)</th>
+            <th>Avg Latency (ms)</th>
+          </tr>
+        </thead>
+        <tbody id="model-usage-tbody"></tbody>
+      </table>
+    </section>
+  </main>
+  <script src="app.js"></script>
+  <script>window.addEventListener('load', loadModelsPage);</script>
+</body>
+</html>
