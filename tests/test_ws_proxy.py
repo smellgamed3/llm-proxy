@@ -161,7 +161,7 @@ class TestWSRecording:
         client = TestClient(app)
         with client.websocket_connect("/ws/realtime") as ws:
             ws.receive_text()
-        rows = db_rows(rec, "ws_connections")
+        rows = db_rows(rec, "raw_ws_connections")
         assert len(rows) == 1
         assert rows[0]["path"] == "/ws/realtime"
 
@@ -173,7 +173,7 @@ class TestWSRecording:
             ws.send_text("test-message")
             ws.receive_text()  # echo (server→client)
 
-        msgs = db_rows(rec, "ws_messages")
+        msgs = db_rows(rec, "raw_ws_messages")
         directions = {m["direction"] for m in msgs}
         assert "client_to_server" in directions
         assert "server_to_client" in directions
@@ -186,7 +186,7 @@ class TestWSRecording:
         with client.websocket_connect("/ws") as ws:
             ws.receive_text()
 
-        rows = db_rows(rec, "ws_connections")
+        rows = db_rows(rec, "raw_ws_connections")
         assert rows[0]["duration_ms"] is not None
         assert rows[0]["duration_ms"] >= 0
         assert rows[0]["closed_at"] is not None
@@ -198,7 +198,7 @@ class TestWSRecording:
         with client.websocket_connect("/ws/internal") as ws:
             ws.receive_text()
 
-        assert db_rows(rec, "ws_connections") == []
+        assert db_rows(rec, "raw_ws_connections") == []
 
     def test_ws_recorded_when_included(self, upstream_ws_server, tmp_path: Path):
         filt = RecordingFilter(include=[FilterRule("/ws/realtime")])
@@ -213,6 +213,6 @@ class TestWSRecording:
         with client.websocket_connect("/ws/other") as ws:
             ws.receive_text()
 
-        rows = db_rows(rec, "ws_connections")
+        rows = db_rows(rec, "raw_ws_connections")
         assert len(rows) == 1
         assert rows[0]["path"] == "/ws/realtime"
