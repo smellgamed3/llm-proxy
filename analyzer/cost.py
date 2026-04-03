@@ -57,7 +57,7 @@ class CostCalculator:
             return
         try:
             mtime = self.pricing_file.stat().st_mtime
-            if mtime == self._mtime:
+            if mtime <= self._mtime:
                 return
             with open(self.pricing_file, "r", encoding="utf-8") as f:
                 self._pricing = yaml.safe_load(f) or {}
