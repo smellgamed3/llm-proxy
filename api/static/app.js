@@ -388,6 +388,9 @@ function promptOptimizationHints(detail) {
   const userPrompt = detail.user_prompt || '';
   const systemPrompt = detail.system_prompt || '';
   const assistantResponse = detail.assistant_response || '';
+  const durationMs = Number(detail.duration_ms || 0);
+  const extUsage = detail._extUsage || {};
+  const cacheRead = Number(extUsage.cacheRead || 0);
 
   if (systemPrompt.length > 2800) {
     hints.push('System prompt 偏长，建议拆分固定政策与动态上下文，减少重复 token。');
@@ -403,6 +406,20 @@ function promptOptimizationHints(detail) {
   }
   if (assistantResponse.length > 0 && userPrompt.length > 0 && assistantResponse.length / userPrompt.length > 20) {
     hints.push('回复长度远高于用户输入，可尝试增加“简洁回答”约束减少成本。');
+  }
+  if (promptTokens > 1000 && cacheRead === 0) {
+    hints.push('输入 token 较多但未使用缓存，可考虑启用 Prompt Caching 降低成本。');
+  }
+  if (cacheRead > 0 && promptTokens > 0 && cacheRead / promptTokens > 0.8) {
+    hints.push('缓存命中率优秀，Prompt Caching 运作良好。');
+  }
+  if (durationMs > 0 && completionTokens > 0) {
+    const speed = completionTokens / (durationMs / 1000);
+    if (speed < 15) hints.push('生成速度较慢 (' + speed.toFixed(1) + ' tok/s)，可考虑使用更快模型。');
+  }
+  const reqMessages = detail._reqMessages;
+  if (Array.isArray(reqMessages) && reqMessages.length > 20) {
+    hints.push('消息历史较长 (' + reqMessages.length + ' 条)，可考虑摘要旧消息降低输入 token。');
   }
   if (hints.length === 0) {
     hints.push('未发现明显异常，可继续按模型、模板、时段进行横向对比优化。');
@@ -598,6 +615,8 @@ async function showConversationDetail(conversationId) {
         reqBodySize,
         resBodySize,
         reasoningTokens,
+        rawRequestBody: raw.request_body,
+        extUsage,
       });
     }
 
@@ -607,13 +626,6 @@ async function showConversationDetail(conversationId) {
   } catch (e) {
     console.error('Conversation detail load error:', e);
   }
-}
-
-function formatBytes(bytes) {
-  if (bytes == null) return '—';
-  if (bytes < 1024) return bytes + ' B';
-  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
-  return (bytes / 1048576).toFixed(2) + ' MB';
 }
 
 function formatBytes(bytes) {
@@ -799,6 +811,349 @@ function toggleToolParams(cardId, event) {
   if (card) card.classList.toggle('tool-card-expanded', show);
 }
 
+/* ── Performance Analysis ────────────────────────────────────── */
+
+function analyzePerformance(detail, usage) {
+  const durationMs = Number(detail.duration_ms || 0);
+  const durationSec = durationMs / 1000;
+  const promptTokens = Number(detail.prompt_tokens || usage?.prompt || 0);
+  const completionTokens = Number(detail.completion_tokens || usage?.completion || 0);
+  const totalTokens = Number(detail.total_tokens || usage?.total || promptTokens + completionTokens);
+  const cacheRead = Number(usage?.cacheRead || 0);
+  const cacheCreation = Number(usage?.cacheCreation || 0);
+  const reasoning = Number(usage?.reasoning || 0);
+  const costUsd = Number(detail.cost_usd || 0);
+
+  const tokensPerSec = durationSec > 0 && completionTokens > 0 ? (completionTokens / durationSec) : null;
+  const totalThroughput = durationSec > 0 && totalTokens > 0 ? (totalTokens / durationSec) : null;
+  const ioRatio = promptTokens > 0 ? (completionTokens / promptTokens) : null;
+  const cacheHitRate = promptTokens > 0 && cacheRead > 0 ? (cacheRead / promptTokens) : null;
+  const reasoningRatio = completionTokens > 0 && reasoning > 0 ? (reasoning / completionTokens) : null;
+  const costPerOutputToken = costUsd > 0 && completionTokens > 0 ? (costUsd / completionTokens * 1000) : null;
+  const costPer1kTokens = costUsd > 0 && totalTokens > 0 ? (costUsd / totalTokens * 1000) : null;
+
+  return {
+    durationMs, durationSec, promptTokens, completionTokens, totalTokens,
+    cacheRead, cacheCreation, reasoning,
+    tokensPerSec, totalThroughput, ioRatio,
+    cacheHitRate, reasoningRatio,
+    costUsd, costPerOutputToken, costPer1kTokens,
+  };
+}
+
+function renderPerformanceSection(perf) {
+  const cards = [];
+  if (perf.tokensPerSec != null) {
+    const speedClass = perf.tokensPerSec > 80 ? 'perf-good' : perf.tokensPerSec > 30 ? 'perf-ok' : 'perf-slow';
+    cards.push({ label: '生成速度', value: perf.tokensPerSec.toFixed(1) + ' tok/s', cls: speedClass });
+  }
+  if (perf.totalThroughput != null) {
+    cards.push({ label: '总吞吐量', value: perf.totalThroughput.toFixed(1) + ' tok/s', cls: '' });
+  }
+  cards.push({ label: '延迟', value: perf.durationMs > 0 ? fmt(perf.durationMs, 1) + ' ms' : '—', cls: '' });
+  if (perf.ioRatio != null) {
+    cards.push({ label: 'I/O 比', value: perf.ioRatio.toFixed(2), cls: '' });
+  }
+  if (perf.cacheHitRate != null) {
+    const pct = (perf.cacheHitRate * 100).toFixed(1);
+    cards.push({ label: '缓存命中', value: pct + '%', cls: perf.cacheHitRate > 0.5 ? 'perf-good' : '' });
+  }
+  if (perf.reasoningRatio != null) {
+    cards.push({ label: '推理占比', value: (perf.reasoningRatio * 100).toFixed(1) + '%', cls: '' });
+  }
+  if (perf.costPerOutputToken != null) {
+    cards.push({ label: '$/1k 输出', value: '$' + perf.costPerOutputToken.toFixed(4), cls: '' });
+  }
+  if (perf.costPer1kTokens != null) {
+    cards.push({ label: '$/1k 总 Token', value: '$' + perf.costPer1kTokens.toFixed(4), cls: '' });
+  }
+
+  let html = `<div class="perf-cards">`;
+  cards.forEach(c => {
+    html += `<div class="perf-card ${c.cls}">
+      <div class="perf-card-value">${c.value}</div>
+      <div class="perf-card-label">${c.label}</div>
+    </div>`;
+  });
+  html += `</div>`;
+
+  // Speed gauge bar
+  if (perf.tokensPerSec != null) {
+    const maxSpeed = 150;
+    const pct = Math.min(100, (perf.tokensPerSec / maxSpeed) * 100);
+    const hue = Math.min(120, (perf.tokensPerSec / maxSpeed) * 120);
+    html += `<div class="perf-gauge">
+      <div class="perf-gauge-label">生成速度 <span>${perf.tokensPerSec.toFixed(1)} tok/s</span></div>
+      <div class="perf-gauge-track"><div class="perf-gauge-fill" style="width:${pct}%;background:hsl(${hue},70%,45%)"></div></div>
+      <div class="perf-gauge-scale"><span>0</span><span>慢 (&lt;30)</span><span>中等</span><span>快 (&gt;80)</span><span>${maxSpeed}</span></div>
+    </div>`;
+  }
+
+  return html;
+}
+
+/* ── Content Analysis ────────────────────────────────────── */
+
+function analyzeContent(systemPrompt, userPrompt, assistantResponse, reqMessages) {
+  const countWords = (text) => {
+    if (!text) return 0;
+    // Handle mixed Chinese/English text
+    const cjk = (text.match(/[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff]/g) || []).length;
+    const western = (text.match(/[a-zA-Z]+/g) || []).length;
+    return cjk + western;
+  };
+
+  const countCodeBlocks = (text) => {
+    if (!text) return { blocks: 0, lines: 0, languages: [] };
+    const matches = text.match(/```(\w*)\n[\s\S]*?```/g) || [];
+    const languages = new Set();
+    let totalLines = 0;
+    matches.forEach(m => {
+      const langMatch = m.match(/^```(\w+)/);
+      if (langMatch && langMatch[1]) languages.add(langMatch[1]);
+      totalLines += m.split('\n').length - 2; // minus opening/closing
+    });
+    return { blocks: matches.length, lines: totalLines, languages: [...languages] };
+  };
+
+  const estimateReadingTime = (text) => {
+    if (!text) return 0;
+    const words = countWords(text);
+    // ~250 words/min for reading speed
+    return Math.ceil(words / 250);
+  };
+
+  const detectFormat = (text) => {
+    if (!text) return 'empty';
+    const trimmed = text.trim();
+    // JSON
+    if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+      try { JSON.parse(trimmed); return 'JSON'; } catch {}
+    }
+    // Code heavy
+    const codeBlocks = (trimmed.match(/```/g) || []).length;
+    if (codeBlocks >= 2) return 'Markdown + Code';
+    // Markdown
+    if (/^#{1,6}\s/m.test(trimmed) || /\*\*[^*]+\*\*/m.test(trimmed) || /^-\s/m.test(trimmed)) return 'Markdown';
+    // XML/HTML
+    if (/<\w+[^>]*>/.test(trimmed) && /<\/\w+>/.test(trimmed)) return 'XML/HTML';
+    return '纯文本';
+  };
+
+  // Conversation turn count
+  let turns = 0;
+  let totalMsgLen = 0;
+  let roleCounts = { system: 0, user: 0, assistant: 0, tool: 0 };
+  if (Array.isArray(reqMessages)) {
+    reqMessages.forEach(msg => {
+      if (!msg) return;
+      const role = msg.role || 'unknown';
+      if (roleCounts[role] !== undefined) roleCounts[role]++;
+      const content = normalizeMessageContent(msg.content) || '';
+      totalMsgLen += content.length;
+      if (role === 'user') turns++;
+    });
+  }
+
+  const systemLen = (systemPrompt || '').length;
+  const userLen = (userPrompt || '').length;
+  const assistantLen = (assistantResponse || '').length;
+  const systemWords = countWords(systemPrompt);
+  const userWords = countWords(userPrompt);
+  const assistantWords = countWords(assistantResponse);
+
+  const responseCode = countCodeBlocks(assistantResponse);
+  const promptCode = countCodeBlocks(userPrompt);
+  const responseFormat = detectFormat(assistantResponse);
+  const readingTime = estimateReadingTime(assistantResponse);
+
+  // Compression ratio: how much output per input character
+  const compressionRatio = userLen > 0 ? (assistantLen / userLen) : null;
+
+  return {
+    systemLen, systemWords,
+    userLen, userWords,
+    assistantLen, assistantWords,
+    turns, roleCounts, totalMsgLen,
+    responseCode, promptCode,
+    responseFormat, readingTime,
+    compressionRatio,
+    totalMessages: Array.isArray(reqMessages) ? reqMessages.length : 0,
+  };
+}
+
+function renderContentAnalysis(content) {
+  let html = '';
+
+  // Summary cards
+  html += `<div class="content-analysis-cards">
+    <div class="content-card">
+      <div class="content-card-value">${content.totalMessages}</div>
+      <div class="content-card-label">消息数</div>
+    </div>
+    <div class="content-card">
+      <div class="content-card-value">${content.turns}</div>
+      <div class="content-card-label">对话轮次</div>
+    </div>
+    <div class="content-card">
+      <div class="content-card-value">${content.readingTime > 0 ? content.readingTime + ' min' : '—'}</div>
+      <div class="content-card-label">阅读时间</div>
+    </div>
+    <div class="content-card">
+      <div class="content-card-value">${content.responseFormat}</div>
+      <div class="content-card-label">回复格式</div>
+    </div>
+  </div>`;
+
+  // Text length breakdown table
+  html += `<div class="content-table-wrap">
+    <table class="content-table">
+      <thead><tr><th>内容</th><th>字符数</th><th>词数</th><th>占比</th></tr></thead>
+      <tbody>`;
+  const totalChars = content.systemLen + content.userLen + content.assistantLen;
+  const rows = [
+    { label: 'System Prompt', chars: content.systemLen, words: content.systemWords },
+    { label: 'User Input', chars: content.userLen, words: content.userWords },
+    { label: 'Assistant Output', chars: content.assistantLen, words: content.assistantWords },
+  ];
+  rows.forEach(r => {
+    const pct = totalChars > 0 ? ((r.chars / totalChars) * 100).toFixed(1) : '0.0';
+    html += `<tr>
+      <td>${r.label}</td>
+      <td>${fmt(r.chars)}</td>
+      <td>${fmt(r.words)}</td>
+      <td>
+        <div class="content-pct-bar"><div class="content-pct-fill" style="width:${pct}%"></div></div>
+        <span>${pct}%</span>
+      </td>
+    </tr>`;
+  });
+  html += `</tbody></table></div>`;
+
+  // Message role distribution
+  if (content.totalMessages > 0) {
+    const roleEntries = Object.entries(content.roleCounts).filter(([, v]) => v > 0);
+    if (roleEntries.length > 0) {
+      html += `<div class="content-role-dist">
+        <div class="content-subtitle">消息角色分布</div>
+        <div class="content-role-bars">`;
+      const maxCount = Math.max(...roleEntries.map(([, v]) => v));
+      const roleColors = { system: '#f59e0b', user: '#3b82f6', assistant: '#10b981', tool: '#8b5cf6' };
+      roleEntries.forEach(([role, count]) => {
+        const pct = (count / maxCount) * 100;
+        html += `<div class="content-role-row">
+          <span class="content-role-name">${role}</span>
+          <div class="content-role-bar-bg"><div class="content-role-bar-fill" style="width:${pct}%;background:${roleColors[role] || '#64748b'}"></div></div>
+          <span class="content-role-count">${count}</span>
+        </div>`;
+      });
+      html += `</div></div>`;
+    }
+  }
+
+  // Code blocks detection
+  if (content.responseCode.blocks > 0 || content.promptCode.blocks > 0) {
+    html += `<div class="content-code-info">
+      <div class="content-subtitle">代码块分析</div>
+      <div class="content-code-row">`;
+    if (content.promptCode.blocks > 0) {
+      html += `<div class="content-code-card">
+        <strong>输入</strong>
+        <span>${content.promptCode.blocks} 块 · ${content.promptCode.lines} 行</span>
+        ${content.promptCode.languages.length > 0 ? `<span class="content-code-langs">${content.promptCode.languages.join(', ')}</span>` : ''}
+      </div>`;
+    }
+    if (content.responseCode.blocks > 0) {
+      html += `<div class="content-code-card">
+        <strong>输出</strong>
+        <span>${content.responseCode.blocks} 块 · ${content.responseCode.lines} 行</span>
+        ${content.responseCode.languages.length > 0 ? `<span class="content-code-langs">${content.responseCode.languages.join(', ')}</span>` : ''}
+      </div>`;
+    }
+    html += `</div></div>`;
+  }
+
+  // Compression ratio
+  if (content.compressionRatio != null) {
+    const ratio = content.compressionRatio;
+    const label = ratio > 5 ? '高膨胀' : ratio > 1 ? '正常' : '压缩';
+    html += `<div class="content-compression">
+      <span class="content-subtitle">输入输出比</span>
+      <span class="content-compression-value">${ratio.toFixed(2)}x <small>(${label})</small></span>
+    </div>`;
+  }
+
+  return html;
+}
+
+/* ── Request Configuration ────────────────────────────────────── */
+
+function extractRequestConfig(requestBody) {
+  const parsed = parseField(requestBody);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+
+  const config = {};
+  const fields = [
+    'temperature', 'max_tokens', 'top_p', 'top_k',
+    'frequency_penalty', 'presence_penalty', 'repetition_penalty',
+    'seed', 'n', 'stop', 'response_format',
+    'stream', 'stream_options', 'logprobs', 'top_logprobs',
+    'tool_choice', 'parallel_tool_calls',
+  ];
+  fields.forEach(f => {
+    if (parsed[f] !== undefined) config[f] = parsed[f];
+  });
+  // Also extract model for display
+  if (parsed.model) config._model = parsed.model;
+  return Object.keys(config).length > 0 ? config : null;
+}
+
+function renderRequestConfig(config) {
+  if (!config) return '<div class="muted">未检测到模型参数</div>';
+
+  const labels = {
+    temperature: { label: '温度', desc: '控制随机性，越高越随机' },
+    max_tokens: { label: '最大 Token', desc: '限制输出长度' },
+    top_p: { label: 'Top-P', desc: '核采样阈值' },
+    top_k: { label: 'Top-K', desc: 'Top-K 采样' },
+    frequency_penalty: { label: '频率惩罚', desc: '降低已出现词频' },
+    presence_penalty: { label: '存在惩罚', desc: '鼓励新话题' },
+    repetition_penalty: { label: '重复惩罚', desc: '抑制重复' },
+    seed: { label: '随机种子', desc: '可复现的随机' },
+    n: { label: '生成数量', desc: '生成几个回复' },
+    stop: { label: '停止序列', desc: '遇到即停止' },
+    response_format: { label: '响应格式', desc: 'JSON mode 等' },
+    stream: { label: '流式输出', desc: '是否流式' },
+    stream_options: { label: '流式选项', desc: '流式配置' },
+    logprobs: { label: 'Log Probs', desc: '返回概率' },
+    top_logprobs: { label: 'Top Log Probs', desc: '概率数量' },
+    tool_choice: { label: 'Tool Choice', desc: '工具选择策略' },
+    parallel_tool_calls: { label: '并行调用', desc: '是否并行 tool calls' },
+  };
+
+  let html = `<div class="config-grid">`;
+  Object.entries(config).forEach(([key, value]) => {
+    if (key.startsWith('_')) return;
+    const info = labels[key] || { label: key, desc: '' };
+    let displayValue = value;
+    if (typeof value === 'boolean') displayValue = value ? '✓ 是' : '✗ 否';
+    else if (typeof value === 'object') displayValue = JSON.stringify(value);
+    else if (value === null || value === undefined) displayValue = '—';
+
+    // Highlight non-default values
+    const isDefault = (key === 'temperature' && value === 1) || (key === 'top_p' && value === 1) ||
+      (key === 'frequency_penalty' && value === 0) || (key === 'presence_penalty' && value === 0) ||
+      (key === 'n' && value === 1);
+
+    html += `<div class="config-item${isDefault ? '' : ' config-item-custom'}">
+      <div class="config-item-label" title="${escapeHtml(info.desc)}">${info.label}</div>
+      <div class="config-item-value">${escapeHtml(String(displayValue))}</div>
+    </div>`;
+  });
+  html += `</div>`;
+  return html;
+}
+
 function renderTokenBreakdown(info) {
   const {
     promptTokens: pt, completionTokens: ct, totalTokens: tt,
@@ -972,7 +1327,7 @@ function renderTokenBreakdown(info) {
 function buildCollapsibleSections(ctx) {
   const { detail, reqMessages, resolvedSystemPrompt, resolvedUserPrompt, resolvedAssistant,
     resolvedPromptTokens, resolvedCompletionTokens, resolvedTotalTokens, fallbackTools,
-    fullToolDefs, reqBodySize, resBodySize, reasoningTokens } = ctx;
+    fullToolDefs, reqBodySize, resBodySize, reasoningTokens, rawRequestBody, extUsage } = ctx;
 
   const sections = [];
 
@@ -1155,7 +1510,57 @@ function buildCollapsibleSections(ctx) {
     }));
   }
 
-  // 7. Optimization Hints section
+  // 7. Performance Analysis section
+  {
+    const perf = analyzePerformance(detail, extUsage);
+    if (perf.durationMs > 0 || perf.totalTokens > 0) {
+      const speedBadge = perf.tokensPerSec != null ? `${perf.tokensPerSec.toFixed(1)} tok/s` : '';
+      sections.push(buildSection({
+        id: 'section-performance',
+        icon: '📈',
+        iconClass: 'section-icon-performance',
+        title: '性能分析',
+        badge: speedBadge,
+        contentHTML: renderPerformanceSection(perf),
+        defaultOpen: false,
+      }));
+    }
+  }
+
+  // 8. Content Analysis section
+  {
+    const content = analyzeContent(resolvedSystemPrompt, resolvedUserPrompt, resolvedAssistant, reqMessages);
+    if (content.totalMessages > 0 || content.userLen > 0 || content.assistantLen > 0) {
+      sections.push(buildSection({
+        id: 'section-content',
+        icon: '📝',
+        iconClass: 'section-icon-content',
+        title: '内容分析',
+        badge: content.totalMessages > 0 ? `${content.totalMessages} msgs · ${content.turns} turns` : null,
+        contentHTML: renderContentAnalysis(content),
+        defaultOpen: false,
+      }));
+    }
+  }
+
+  // 9. Request Configuration section
+  {
+    const config = extractRequestConfig(rawRequestBody);
+    if (config) {
+      const paramCount = Object.keys(config).filter(k => !k.startsWith('_')).length;
+      sections.push(buildSection({
+        id: 'section-config',
+        icon: '⚙️',
+        iconClass: 'section-icon-config',
+        title: '请求配置',
+        badge: `${paramCount} params`,
+        contentHTML: renderRequestConfig(config),
+        defaultOpen: false,
+      }));
+    }
+  }
+
+  // 10. Optimization Hints section
   const hints = promptOptimizationHints({
     ...detail,
     system_prompt: resolvedSystemPrompt,
@@ -1164,6 +1569,8 @@ function buildCollapsibleSections(ctx) {
     prompt_tokens: resolvedPromptTokens,
     completion_tokens: resolvedCompletionTokens,
     total_tokens: resolvedTotalTokens,
+    _extUsage: extUsage,
+    _reqMessages: reqMessages,
   });
   sections.push(buildSection({
     id: 'section-hints',
