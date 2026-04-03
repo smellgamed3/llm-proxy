@@ -252,6 +252,28 @@ curl http://localhost:9091/api/admin/analyzer/status
 # → {"watermark_seq": 12345, "records_processed": 12345, ...}
 ```
 
+## 生产镜像 Smoke Test
+
+当使用 `docker-compose.prod.yaml` 拉取远端 GHCR 镜像启动后，可用一条脚本做端到端验收：
+
+```bash
+bash scripts/smoke_prod.sh
+```
+
+默认会检查：
+
+- 代理健康接口
+- API 总览接口
+- 通过代理发送一条请求
+- 等待 analyzer 处理后检查 conversations
+- 验证 `/api/conversations/{id}/raw` 回溯出的 request/response body
+
+如果你的宿主机端口不是默认值，可显式指定：
+
+```bash
+PROXY_PORT=19090 API_PORT=19091 ANALYZER_WAIT_SECONDS=8 bash scripts/smoke_prod.sh
+```
+
 ## 文档
 
 详细设计和运维文档见 [docs/](docs/README.md)：
