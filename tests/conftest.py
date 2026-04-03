@@ -30,28 +30,12 @@ def db_rows(recorder: Recorder, table: str, **where) -> list[dict]:
 
 
 def jsonl_bodies(recorder: Recorder) -> list[dict]:
-    """Parse all JSONL body records from the sharded bodies directory."""
-    bodies_dir = recorder.bodies_dir
-    if not bodies_dir.exists():
-        return []
-    entries = []
-    for jsonl_file in sorted(bodies_dir.glob("*.jsonl")):
-        if jsonl_file.name == "manifest.jsonl":
-            continue
-        for line in jsonl_file.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                entries.append(json.loads(line))
-    return entries
-
-
-def jsonl_manifest(recorder: Recorder) -> list[dict]:
-    """Parse all manifest entries from bodies/manifest.jsonl."""
-    manifest_path = recorder.bodies_dir / "manifest.jsonl"
-    if not manifest_path.exists():
+    """Parse all JSONL body records."""
+    if not recorder.jsonl_path.exists():
         return []
     return [
         json.loads(line)
-        for line in manifest_path.read_text(encoding="utf-8").splitlines()
+        for line in recorder.jsonl_path.read_text().splitlines()
         if line.strip()
     ]
 

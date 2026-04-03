@@ -103,7 +103,7 @@ class TestHealthEndpoint:
         )
         client.get("/health")
         # /health is handled locally, never reaches proxy handler
-        assert db_rows(rec, "raw_requests") == []
+        assert db_rows(rec, "requests") == []
 
 
 class TestHTTPProxyForwarding:
@@ -360,12 +360,11 @@ class TestHTTPRecording:
         client, _, rec = make_proxy_with_upstream(tmp_path, upstream)
 
         client.post("/v1/chat/completions", json={"model": "gpt-4"})
-        rows = db_rows(rec, "raw_requests")
+        rows = db_rows(rec, "requests")
         assert len(rows) == 1
         assert rows[0]["path"] == "/v1/chat/completions"
         assert rows[0]["method"] == "POST"
-        # model is NOT extracted at the recording layer (zero-parse principle)
-        assert "model" not in rows[0]
+        assert rows[0]["model"] == "gpt-4"
 
     def test_response_recorded(self, tmp_path: Path):
         async def ok(req: Request):
@@ -375,52 +374,9 @@ class TestHTTPRecording:
         client, _, rec = make_proxy_with_upstream(tmp_path, upstream)
 
         client.post("/v1/chat", json={"model": "m"})
-        rows = db_rows(rec, "raw_requests")
+        rows = db_rows(rec, "requests")
         assert rows[0]["status_code"] == 200
         assert rows[0]["duration_ms"] > 0
-
-    def test_seq_assigned(self, tmp_path: Path):
-        async def ok(req: Request):
-            return JSONResponse({"ok": True})
-
-        upstream = make_upstream([Route("/{path:path}", ok, methods=["POST"]), Route("/", ok, methods=["POST"])])
-        client, _, rec = make_proxy_with_upstream(tmp_path, upstream)
-
-        client.post("/v1/chat", json={})
-        client.post("/v1/chat", json={})
-        rows = db_rows(rec, "raw_requests")
-        assert len(rows) == 2
-        seqs = sorted(r["seq"] for r in rows)
-        assert seqs[1] == seqs[0] + 1
-
-    def test_upstream_url_recorded(self, tmp_path: Path):
-        async def ok(req: Request):
-            return JSONResponse({"ok": True})
-
-        upstream = make_upstream([Route("/{path:path}", ok, methods=["POST"]), Route("/", ok, methods=["POST"])])
-        client, _, rec = make_proxy_with_upstream(
-            tmp_path, upstream,
-            upstream_base_url="http://testserver",
-        )
-
-        client.post("/v1/chat/completions", json={})
-        rows = db_rows(rec, "raw_requests")
-        assert rows[0]["upstream_url"] is not None
-        assert "/v1/chat/completions" in rows[0]["upstream_url"]
-
-    def test_request_body_size_recorded(self, tmp_path: Path):
-        async def ok(req: Request):
-            return JSONResponse({"ok": True})
-
-        upstream = make_upstream([Route("/{path:path}", ok, methods=["POST"]), Route("/", ok, methods=["POST"])])
-        client, _, rec = make_proxy_with_upstream(tmp_path, upstream)
-
-        payload = {"model": "gpt-4", "messages": [{"role": "user", "content": "hi"}]}
-        client.post("/v1/chat", json=payload)
-        rows = db_rows(rec, "raw_requests")
-        # body_size must be a positive integer matching the actual bytes sent
-        assert rows[0]["request_body_size"] is not None
-        assert rows[0]["request_body_size"] > 0
 
     def test_request_body_in_jsonl(self, tmp_path: Path):
         async def ok(req: Request):
@@ -445,7 +401,7 @@ class TestRecordingFilter:
         client, _, rec = make_proxy_with_upstream(tmp_path, upstream, recording_filter=filt)
 
         client.get("/v1/models")
-        assert db_rows(rec, "raw_requests") == []
+        assert db_rows(rec, "requests") == []
 
     def test_excluded_path_still_forwarded(self, tmp_path: Path):
         """Even excluded paths are forwarded — just not recorded."""
@@ -469,7 +425,7 @@ class TestRecordingFilter:
 
         client.get("/v1/chat/completions")
         client.get("/v1/models")  # not in include
-        rows = db_rows(rec, "raw_requests")
+        rows = db_rows(rec, "requests")
         assert len(rows) == 1
         assert rows[0]["path"] == "/v1/chat/completions"
 
@@ -510,7 +466,7 @@ class TestSSEProxy:
         client, _, rec = make_proxy_with_upstream(tmp_path, upstream)
 
         client.post("/v1/chat/completions", json={"model": "gpt-4", "stream": True})
-        rows = db_rows(rec, "raw_requests")
+        rows = db_rows(rec, "requests")
         assert rows[0]["is_stream"] == 1
         bodies = jsonl_bodies(rec)
         resp_bodies = [b for b in bodies if b["ref"].endswith(":response")]

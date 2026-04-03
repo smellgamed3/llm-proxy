@@ -86,8 +86,6 @@ class WSProxyHandler:
                         query_string=query_string,
                         headers=dict(websocket.headers),
                         subprotocol=negotiated,
-                        client_ip=websocket.client.host if websocket.client else None,
-                        client_port=websocket.client.port if websocket.client else None,
                     )
 
                 # Bridge both directions concurrently
