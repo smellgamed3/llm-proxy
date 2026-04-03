@@ -1,0 +1,68 @@
+services:
+  llm-provider:
+    image: hashicorp/http-echo:1.0.0
+    container_name: llm-provider-prod
+    restart: unless-stopped
+    command: ["-listen=:8080", "-text={\"ok\":true}"]
+
+  llm-proxy:
+    image: ghcr.io/smellgamed3/llm-proxy:${APP_VERSION:-0.2.1}
+    pull_policy: always
+    container_name: llm-proxy-prod
+    restart: unless-stopped
+    ports:
+      - "${PROXY_PORT:-9090}:9090"
+    environment:
+      UPSTREAM_URL: ${UPSTREAM_URL:-http://llm-provider:8080}
+      LISTEN_PORT: "9090"
+      LOG_DIR: /data/logs
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      CONFIG_FILE: /etc/llm-proxy/config.yaml
+    volumes:
+      - llm-proxy-logs:/data/logs
+      - ./config.yaml:/etc/llm-proxy/config.yaml:ro
+      - ./pricing.yaml:/etc/llm-proxy/pricing.yaml:ro
+    depends_on:
+      - llm-provider
+
+  analyzer:
+    image: ghcr.io/smellgamed3/llm-proxy-analyzer:${APP_VERSION:-0.2.1}
+    pull_policy: always
+    container_name: llm-analyzer-prod
+    restart: unless-stopped
+    environment:
+      RAW_DB: /data/logs/raw.db
+      ANALYTICS_DB: /data/analytics/analytics.db
+      BODIES_DIR: /data/logs/bodies
+      PRICING_FILE: /etc/llm-proxy/pricing.yaml
+      ANALYZER_INTERVAL: "5"
+      ANALYZER_BATCH_SIZE: "100"
+    volumes:
+      - llm-proxy-logs:/data/logs
+      - llm-analytics:/data/analytics
+      - ./pricing.yaml:/etc/llm-proxy/pricing.yaml:ro
+    depends_on:
+      - llm-proxy
+
+  api:
+    image: ghcr.io/smellgamed3/llm-proxy-api:${APP_VERSION:-0.2.1}
+    pull_policy: always
+    container_name: llm-analytics-api-prod
+    restart: unless-stopped
+    ports:
+      - "${API_PORT:-9091}:9091"
+    environment:
+      RAW_DB: /data/logs/raw.db
+      ANALYTICS_DB: /data/analytics/analytics.db
+      BODIES_DIR: /data/logs/bodies
+    volumes:
+      - llm-proxy-logs:/data/logs
+      - llm-analytics:/data/analytics
+    depends_on:
+      - analyzer
+
+volumes:
+  llm-proxy-logs:
+    driver: local
+  llm-analytics:
+    driver: local

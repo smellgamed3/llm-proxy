@@ -42,12 +42,31 @@ jobs:
 
   # ── Job 2: Build & push image — only on main branch or version tags ──────
   build-and-push:
-    name: Build & Push to GHCR
+    name: Build & Push to GHCR (${{ matrix.component.name }})
     runs-on: ubuntu-latest
     needs: test  # only runs after ALL test matrix jobs pass
     if: |
       github.event_name != 'pull_request' &&
       (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    strategy:
+      fail-fast: false
+      matrix:
+        component:
+          - name: proxy
+            dockerfile: Dockerfile
+            image_suffix: ""
+            title: llm-proxy
+            description: Transparent HTTP/WebSocket proxy for recording LLM API traffic
+          - name: analyzer
+            dockerfile: Dockerfile.analyzer
+            image_suffix: "-analyzer"
+            title: llm-proxy-analyzer
+            description: Analyzer worker for extracting and aggregating LLM traffic analytics
+          - name: api
+            dockerfile: Dockerfile.api
+            image_suffix: "-api"
+            title: llm-proxy-api
+            description: Analytics query API and dashboard for LLM proxy
 
     permissions:
       contents: read
@@ -71,7 +90,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}${{ matrix.component.image_suffix }}
           tags: |
             # branch push → tag as branch name (e.g. "main")
             type=ref,event=branch
@@ -83,24 +102,25 @@ jobs:
             # always include short commit SHA
             type=sha,prefix=sha-,format=short
           labels: |
-            org.opencontainers.image.title=llm-proxy
-            org.opencontainers.image.description=Transparent HTTP/WebSocket proxy for recording LLM API traffic
+            org.opencontainers.image.title=${{ matrix.component.title }}
+            org.opencontainers.image.description=${{ matrix.component.description }}
 
       - name: Build and push
         id: build
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: ${{ matrix.component.dockerfile }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # GitHub Actions cache for fast rebuilds
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.component.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component.name }}
           # Multi-platform: amd64 for servers, arm64 for Mac/Graviton
           platforms: linux/amd64,linux/arm64
           provenance: true
           sbom: true
 
       - name: Print image digest
-        run: echo "Pushed ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}"
+        run: echo "Pushed ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}${{ matrix.component.image_suffix }}@${{ steps.build.outputs.digest }}"

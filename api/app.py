@@ -9,7 +9,7 @@ from .routers import overview, conversations, costs, latency, prompts, models, e
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="LLM Proxy Analytics API", version="0.2.0")
+    app = FastAPI(title="LLM Proxy Analytics API", version="0.2.1")
 
     app.include_router(overview.router, prefix="/api")
     app.include_router(conversations.router, prefix="/api")
