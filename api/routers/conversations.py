@@ -22,6 +22,8 @@ def list_conversations(
     date_to: str | None = None,
     q: str | None = None,
     template_id: str | None = None,
+    path_prefix: str | None = None,
+    request_type: str | None = None,
     sort: str = "timestamp",
     order: str = "desc",
     db: sqlite3.Connection = Depends(get_analytics_db),
@@ -50,6 +52,12 @@ def list_conversations(
     if template_id:
         where_clauses.append("template_id = ?")
         params.append(template_id)
+    if path_prefix:
+        where_clauses.append("path LIKE ?")
+        params.append(f"{path_prefix}%")
+    if request_type:
+        where_clauses.append("request_type = ?")
+        params.append(request_type)
     if q:
         where_clauses.append("(user_prompt LIKE ? OR system_prompt LIKE ? OR assistant_response LIKE ?)")
         like_q = f"%{q}%"
@@ -67,7 +75,9 @@ def list_conversations(
         f"""SELECT id, seq, timestamp, path, method, provider, model, request_type,
                    status, error_type, status_code, is_stream, duration_ms,
                    prompt_tokens, completion_tokens, total_tokens, cost_usd,
-                   template_id, finish_reason, has_tools, messages_count
+                   template_id, finish_reason, has_tools, messages_count,
+                   substr(coalesce(user_prompt, ''), 1, 160) AS user_prompt_preview,
+                   substr(coalesce(assistant_response, ''), 1, 160) AS assistant_response_preview
             FROM conversations {where_sql}
             ORDER BY {sort} {order_dir}
             LIMIT ? OFFSET ?""",

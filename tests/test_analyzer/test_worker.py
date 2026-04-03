@@ -183,6 +183,69 @@ class TestWorkerIncrementalMode:
         wm = worker.analytics_store.get_watermark()
         assert wm == 3
 
+    def test_skips_incomplete_rows_until_response_written(self, setup_dirs, tmp_path: Path):
+        raw_db, analytics_db, bodies_dir, pricing_file = setup_dirs
+        conn = _make_raw_db(raw_db)
+
+        req_body = json.dumps({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "hello"}],
+        })
+        resp_body = "".join([
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1,\"total_tokens\":4}}\n",
+            "data: [DONE]\n",
+        ])
+
+        rid = str(uuid.uuid4())
+        req_ref = f"{rid}:request"
+        resp_ref = f"{rid}:response"
+        _write_body(bodies_dir, req_ref, req_body)
+        _write_body(bodies_dir, resp_ref, resp_body)
+
+        # Insert request row without response status/body yet (incomplete row)
+        conn.execute(
+            """INSERT INTO raw_requests
+               (id, seq, timestamp, method, path, request_body_ref, is_stream)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (rid, 1, datetime.now(timezone.utc).isoformat(), "POST", "/v1/chat/completions", req_ref, 1),
+        )
+        conn.commit()
+
+        config = AnalyzerConfig(
+            raw_db=str(raw_db),
+            analytics_db=str(analytics_db),
+            bodies_dir=str(bodies_dir),
+            pricing_file=str(pricing_file),
+            mode="full",
+            batch_size=10,
+        )
+        worker = AnalyzerWorker(config)
+        worker.run_once()
+
+        aconn = sqlite3.connect(str(analytics_db))
+        count = aconn.execute("SELECT COUNT(*) FROM conversations").fetchone()[0]
+        assert count == 0
+
+        # Complete the row as recorder.record_response would do.
+        conn.execute(
+            """UPDATE raw_requests SET status_code = ?, response_body_ref = ?, response_body_size = ?, duration_ms = ? WHERE id = ?""",
+            (200, resp_ref, len(resp_body.encode("utf-8")), 12.0, rid),
+        )
+        conn.commit()
+
+        # Incremental catch-up should now process it.
+        worker.run_once()
+        row = aconn.execute(
+            "SELECT user_prompt, assistant_response, finish_reason, total_tokens FROM conversations WHERE id = ?",
+            (rid,),
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "hello"
+        assert row[1] == "Hi"
+        assert row[2] == "stop"
+        assert row[3] == 4
+
 
 class TestWorkerFullMode:
     def test_resets_and_reprocesses(self, setup_dirs, tmp_path: Path):

@@ -107,7 +107,10 @@ class AnalyzerWorker:
         try:
             conn = sqlite3.connect(self.config.raw_db, timeout=10)
             conn.row_factory = sqlite3.Row
-            query = """SELECT * FROM raw_requests WHERE seq > ?"""
+            # Only process finalized HTTP records. If we analyze rows before
+            # record_response updates status/body refs, conversation fields can be
+            # permanently empty because watermark moves past them.
+            query = """SELECT * FROM raw_requests WHERE seq > ? AND status_code IS NOT NULL"""
             params: list[object] = [after_seq]
             if until:
                 query += " AND timestamp <= ?"

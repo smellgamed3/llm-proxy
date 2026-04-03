@@ -13,6 +13,36 @@ function fmt(n, decimals = 0) {
   return Number(n).toLocaleString(undefined, { maximumFractionDigits: decimals });
 }
 
+function escapeHtml(text) {
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function truncateText(text, max = 60) {
+  if (!text) return '';
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
+function renderPromptCompletionPreview(row) {
+  const user = (row.user_prompt_preview || '').trim();
+  const assistant = (row.assistant_response_preview || '').trim();
+  if (!user && !assistant) {
+    if ((row.finish_reason || '').toLowerCase() === 'tool_calls') {
+      return '<span class="muted">tool calls / no text</span>';
+    }
+    return '— / —';
+  }
+
+  const userView = truncateText(user, 52) || '—';
+  const assistantView = truncateText(assistant, 52) || '—';
+  const title = `${user || '—'} / ${assistant || '—'}`;
+  return `<span title="${escapeHtml(title)}">${escapeHtml(userView)} / ${escapeHtml(assistantView)}</span>`;
+}
+
 // ── Overview page ─────────────────────────────────────────────────────────
 
 async function loadOverview() {
@@ -102,6 +132,160 @@ function prettyJSONOrText(value) {
   return String(value);
 }
 
+function parseField(raw) {
+  if (typeof raw === 'string') {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return raw;
+    }
+  }
+  return raw;
+}
+
+function hasContent(value) {
+  if (value == null) return false;
+  if (typeof value === 'string') return value.trim().length > 0;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === 'object') return Object.keys(value).length > 0;
+  return true;
+}
+
+function extractMessagesFromRequestBody(requestBody) {
+  const parsed = parseField(requestBody);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  const messages = parsed.messages;
+  if (Array.isArray(messages) && messages.length > 0) return messages;
+  return null;
+}
+
+function normalizeMessageContent(content) {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    const texts = content
+      .map((item) => {
+        if (typeof item === 'string') return item;
+        if (item && typeof item === 'object') return item.text || item.content || '';
+        return '';
+      })
+      .filter(Boolean);
+    return texts.join(' ').trim() || null;
+  }
+  if (content && typeof content === 'object') {
+    return content.text || content.content || null;
+  }
+  return null;
+}
+
+function extractSystemAndUserPrompt(messages) {
+  if (!Array.isArray(messages)) return { systemPrompt: null, userPrompt: null };
+  let systemPrompt = null;
+  let userPrompt = null;
+  messages.forEach((msg) => {
+    if (!msg || typeof msg !== 'object') return;
+    const role = msg.role;
+    const text = normalizeMessageContent(msg.content);
+    if (!text) return;
+    if (role === 'system') systemPrompt = text;
+    if (role === 'user') userPrompt = text;
+  });
+  return { systemPrompt, userPrompt };
+}
+
+function parseSSEChunks(text) {
+  if (typeof text !== 'string') return [];
+  return text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith('data:'))
+    .map((line) => line.slice(5).trim())
+    .filter((payload) => payload && payload !== '[DONE]')
+    .map((payload) => {
+      try {
+        return JSON.parse(payload);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+}
+
+function extractAssistantFromResponseBody(responseBody) {
+  const parsed = parseField(responseBody);
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    const choices = parsed.choices;
+    if (Array.isArray(choices) && choices.length > 0) {
+      const first = choices[0] || {};
+      const message = first.message || {};
+      const fromMessage = normalizeMessageContent(message.content);
+      if (fromMessage) return fromMessage;
+      if (typeof first.text === 'string' && first.text.trim()) return first.text;
+    }
+  }
+
+  if (typeof responseBody === 'string' && responseBody.trim().startsWith('data:')) {
+    const chunks = parseSSEChunks(responseBody);
+    const parts = [];
+    chunks.forEach((chunk) => {
+      const choices = chunk.choices;
+      if (!Array.isArray(choices) || choices.length === 0) return;
+      const delta = (choices[0] || {}).delta || {};
+      const content = normalizeMessageContent(delta.content);
+      const reasoning = normalizeMessageContent(delta.reasoning_content || delta.reasoning);
+      if (content) parts.push(content);
+      if (reasoning) parts.push(reasoning);
+    });
+    if (parts.length > 0) return parts.join('');
+  }
+
+  return null;
+}
+
+function extractUsageFromResponseBody(responseBody) {
+  const readUsage = (obj) => {
+    if (!obj || typeof obj !== 'object') return null;
+    const usage = obj.usage;
+    if (!usage || typeof usage !== 'object') return null;
+    const prompt = usage.prompt_tokens ?? usage.input_tokens ?? null;
+    const completion = usage.completion_tokens ?? usage.output_tokens ?? null;
+    const total = usage.total_tokens ?? ((prompt != null && completion != null) ? (prompt + completion) : null);
+    if (prompt == null && completion == null && total == null) return null;
+    return { prompt, completion, total };
+  };
+
+  const parsed = parseField(responseBody);
+  const direct = readUsage(parsed);
+  if (direct) return direct;
+
+  if (typeof responseBody === 'string' && responseBody.trim().startsWith('data:')) {
+    const chunks = parseSSEChunks(responseBody);
+    let last = null;
+    chunks.forEach((chunk) => {
+      const usage = readUsage(chunk);
+      if (usage) last = usage;
+    });
+    return last;
+  }
+
+  return null;
+}
+
+function extractToolsFromRequestBody(requestBody) {
+  const parsed = parseField(requestBody);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  const tools = parsed.tools || parsed.functions;
+  if (!Array.isArray(tools) || tools.length === 0) return null;
+  return tools.map((tool) => {
+    if (tool && typeof tool === 'object') {
+      if (tool.function && typeof tool.function === 'object' && typeof tool.function.name === 'string') {
+        return tool.function.name;
+      }
+      if (typeof tool.name === 'string') return tool.name;
+    }
+    return 'unknown';
+  });
+}
+
 function promptOptimizationHints(detail) {
   const hints = [];
   const promptTokens = Number(detail.prompt_tokens || 0);
@@ -161,6 +345,8 @@ function collectConversationFilters() {
     ['q', 'q'],
     ['model-filter', 'model'],
     ['template-filter', 'template_id'],
+    ['path-prefix-filter', 'path_prefix'],
+    ['request-type-filter', 'request_type'],
     ['status-filter', 'status'],
     ['date-from', 'date_from'],
     ['date-to', 'date_to'],
@@ -191,7 +377,7 @@ async function loadConversations(page) {
         <td>${r.model || '—'}</td>
         <td><span class="badge badge-${r.status === 'success' ? 'success' : 'error'}">${r.status}</span></td>
         <td>${r.request_type || '—'}</td>
-        <td>${fmt(r.prompt_tokens)} / ${fmt(r.completion_tokens)}</td>
+        <td>${renderPromptCompletionPreview(r)}</td>
         <td>${fmt(r.total_tokens)}</td>
         <td>${r.cost_usd != null ? '$' + Number(r.cost_usd).toFixed(5) : '—'}</td>
         <td>${fmt(r.duration_ms, 1)}</td>
@@ -214,6 +400,20 @@ async function showConversationDetail(conversationId) {
       fetchJSON(`${API}/conversations/${conversationId}/raw`),
     ]);
 
+    const reqMessages = extractMessagesFromRequestBody(raw.request_body);
+    const fallbackPrompts = extractSystemAndUserPrompt(reqMessages);
+    const fallbackAssistant = extractAssistantFromResponseBody(raw.response_body);
+    const fallbackUsage = extractUsageFromResponseBody(raw.response_body);
+    const fallbackTools = extractToolsFromRequestBody(raw.request_body);
+
+    const resolvedSystemPrompt = detail.system_prompt || fallbackPrompts.systemPrompt || '—';
+    const resolvedUserPrompt = detail.user_prompt || fallbackPrompts.userPrompt || '—';
+    const resolvedAssistant = detail.assistant_response || fallbackAssistant || '—';
+
+    const resolvedPromptTokens = detail.prompt_tokens ?? fallbackUsage?.prompt ?? null;
+    const resolvedCompletionTokens = detail.completion_tokens ?? fallbackUsage?.completion ?? null;
+    const resolvedTotalTokens = detail.total_tokens ?? fallbackUsage?.total ?? null;
+
     document.getElementById('conversation-detail').hidden = false;
     document.getElementById('detail-meta').innerHTML = `
       <span><strong>ID:</strong> ${detail.id}</span>
@@ -225,32 +425,40 @@ async function showConversationDetail(conversationId) {
       <span><strong>Latency:</strong> ${fmt(detail.duration_ms, 1)} ms</span>
       <span><strong>Cost:</strong> ${detail.cost_usd != null ? '$' + Number(detail.cost_usd).toFixed(6) : '—'}</span>
     `;
-    document.getElementById('detail-system-prompt').textContent = detail.system_prompt || '—';
-    document.getElementById('detail-user-prompt').textContent = detail.user_prompt || '—';
-    document.getElementById('detail-assistant-response').textContent = detail.assistant_response || '—';
+    document.getElementById('detail-system-prompt').textContent = resolvedSystemPrompt;
+    document.getElementById('detail-user-prompt').textContent = resolvedUserPrompt;
+    document.getElementById('detail-assistant-response').textContent = resolvedAssistant;
     document.getElementById('detail-request-body').textContent = prettyJSONOrText(raw.request_body);
     document.getElementById('detail-response-body').textContent = prettyJSONOrText(raw.response_body);
     document.getElementById('detail-request-headers').textContent = prettyJSONOrText(raw.request_headers);
     document.getElementById('detail-response-headers').textContent = prettyJSONOrText(raw.response_headers);
 
-    const tools = Array.isArray(detail.tools_list) ? detail.tools_list : maybeJSON(detail.tools_list);
+    const tools = (Array.isArray(detail.tools_list) ? detail.tools_list : maybeJSON(detail.tools_list)) || fallbackTools;
     document.getElementById('detail-tools-list').textContent = tools && tools.length
       ? JSON.stringify(tools, null, 2)
       : 'No tool calls detected';
 
-    const promptTokens = Number(detail.prompt_tokens || 0);
-    const completionTokens = Number(detail.completion_tokens || 0);
+    const promptTokens = Number(resolvedPromptTokens || 0);
+    const completionTokens = Number(resolvedCompletionTokens || 0);
     const total = Math.max(promptTokens + completionTokens, 1);
     const promptRatio = Math.max(4, Math.round((promptTokens / total) * 100));
     const completionRatio = Math.max(4, Math.round((completionTokens / total) * 100));
     document.getElementById('bar-prompt').style.width = `${promptRatio}%`;
     document.getElementById('bar-completion').style.width = `${completionRatio}%`;
     document.getElementById('token-breakdown-meta').textContent =
-      `Prompt ${fmt(promptTokens)} (${promptRatio}%) · Completion ${fmt(completionTokens)} (${completionRatio}%) · Total ${fmt(detail.total_tokens)}`;
+      `Prompt ${fmt(promptTokens)} (${promptRatio}%) · Completion ${fmt(completionTokens)} (${completionRatio}%) · Total ${fmt(resolvedTotalTokens)}`;
 
     const analysisEl = document.getElementById('detail-analysis');
     if (analysisEl) {
-      analysisEl.innerHTML = promptOptimizationHints(detail)
+      analysisEl.innerHTML = promptOptimizationHints({
+        ...detail,
+        system_prompt: resolvedSystemPrompt,
+        user_prompt: resolvedUserPrompt,
+        assistant_response: resolvedAssistant,
+        prompt_tokens: resolvedPromptTokens,
+        completion_tokens: resolvedCompletionTokens,
+        total_tokens: resolvedTotalTokens,
+      })
         .map((text) => `<li>${text}</li>`)
         .join('');
     }
@@ -270,13 +478,15 @@ function hideConversationDetail() {
 }
 
 function resetConversationFilters() {
-  ['q', 'model-filter', 'template-filter', 'status-filter', 'date-from', 'date-to', 'sort-filter', 'order-filter', 'page-size-filter']
+  ['q', 'model-filter', 'template-filter', 'path-prefix-filter', 'request-type-filter', 'status-filter', 'date-from', 'date-to', 'sort-filter', 'order-filter', 'page-size-filter']
     .forEach((id) => {
       const el = document.getElementById(id);
       if (!el) return;
       if (id === 'sort-filter') el.value = 'timestamp';
       else if (id === 'order-filter') el.value = 'desc';
       else if (id === 'page-size-filter') el.value = '50';
+      else if (id === 'path-prefix-filter') el.value = '/v1/';
+      else if (id === 'request-type-filter') el.value = 'chat';
       else el.value = '';
     });
   loadConversations(1);

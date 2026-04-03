@@ -1,27 +1,48 @@
 services:
   llm-proxy:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
     container_name: llm-proxy
     restart: unless-stopped
+    working_dir: /app
+    command: >
+      uvicorn app.main:create_app --factory --host 0.0.0.0 --port 9090
+      --reload --reload-dir /app/app --reload-dir /app/analyzer --log-level info
     ports:
       - "${PROXY_PORT:-9090}:9090"
     environment:
-      UPSTREAM_URL: ${UPSTREAM_URL:-http://llm-provider:8080}
+      #UPSTREAM_URL: ${UPSTREAM_URL:-http://llm-provider:8080}
+      UPSTREAM_URL: http://192.168.50.189:20002
       LISTEN_PORT: "9090"
       LOG_DIR: /data/logs
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       CONFIG_FILE: /etc/llm-proxy/config.yaml
     volumes:
       - llm-proxy-logs:/data/logs
+      - ./app:/app/app
+      - ./analyzer:/app/analyzer
       - ./config.yaml:/etc/llm-proxy/config.yaml:ro
       - ./pricing.yaml:/etc/llm-proxy/pricing.yaml:ro
+    labels:
+      # Traefik 配置
+      - "traefik.enable=true"
+      - "traefik.http.routers.llm-proxy.rule=Host(`llm2.snow13.top`)"
+      - "traefik.http.routers.llm-proxy.entrypoints=websecure"
+      - "traefik.http.routers.llm-proxy.tls=true"
+      - "traefik.http.routers.llm-proxy.service=llm-proxy"
+      - "traefik.http.services.llm-proxy.loadbalancer.server.port=9090"
 
   analyzer:
     build:
       context: .
-      dockerfile: Dockerfile.analyzer
+      dockerfile: Dockerfile.dev
     container_name: llm-analyzer
     restart: unless-stopped
+    working_dir: /app
+    command: >
+      watchfiles --filter python --grace-period 0.2
+      "python -m analyzer" /app/analyzer /app/app
     environment:
       RAW_DB: /data/logs/raw.db
       ANALYTICS_DB: /data/analytics/analytics.db
@@ -32,6 +53,8 @@ services:
     volumes:
       - llm-proxy-logs:/data/logs
       - llm-analytics:/data/analytics
+      - ./app:/app/app
+      - ./analyzer:/app/analyzer
       - ./pricing.yaml:/etc/llm-proxy/pricing.yaml:ro
     depends_on:
       - llm-proxy
@@ -39,9 +62,13 @@ services:
   api:
     build:
       context: .
-      dockerfile: Dockerfile.api
+      dockerfile: Dockerfile.dev
     container_name: llm-analytics-api
     restart: unless-stopped
+    working_dir: /app
+    command: >
+      uvicorn api.app:create_app --factory --host 0.0.0.0 --port 9091
+      --reload --reload-dir /app/api --reload-dir /app/analyzer --log-level info
     ports:
       - "${API_PORT:-9091}:9091"
     environment:
@@ -51,6 +78,8 @@ services:
     volumes:
       - llm-proxy-logs:/data/logs
       - llm-analytics:/data/analytics
+      - ./api:/app/api
+      - ./analyzer:/app/analyzer
     depends_on:
       - analyzer
 

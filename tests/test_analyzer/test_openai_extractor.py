@@ -136,6 +136,33 @@ class TestStreamingResponse:
         assert result.assistant_response == "Hi"
         assert result.prompt_tokens is None
 
+    def test_sse_detected_even_when_is_stream_flag_missing(self, extractor):
+        chunks = [
+            {"choices": [{"delta": {"content": "A"}, "finish_reason": None}]},
+            {"choices": [{"delta": {"content": "B"}, "finish_reason": "stop"}]},
+        ]
+        sse_body = "\n".join(f"data: {json.dumps(c)}" for c in chunks) + "\ndata: [DONE]\n"
+        result = extractor.extract(
+            {"path": "/v1/chat/completions", "status_code": 200, "is_stream": 0},
+            json.dumps({"model": "gpt-4o", "messages": []}),
+            sse_body,
+        )
+        assert result.assistant_response == "AB"
+        assert result.finish_reason == "stop"
+
+    def test_sse_reasoning_content_fallback(self, extractor):
+        chunks = [
+            {"choices": [{"delta": {"reasoning_content": "think "}, "finish_reason": None}]},
+            {"choices": [{"delta": {"reasoning_content": "done"}, "finish_reason": "stop"}]},
+        ]
+        sse_body = "\n".join(f"data: {json.dumps(c)}" for c in chunks) + "\ndata: [DONE]\n"
+        result = extractor.extract(
+            {"path": "/v1/chat/completions", "status_code": 200, "is_stream": 1},
+            json.dumps({"model": "zai/glm-5-turbo", "messages": []}),
+            sse_body,
+        )
+        assert result.assistant_response == "think done"
+
 
 class TestEmbedding:
     def test_embedding_extraction(self, extractor):

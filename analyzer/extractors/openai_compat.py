@@ -31,6 +31,34 @@ def _parse_sse_chunks(text: str) -> list[dict]:
     return chunks
 
 
+def _looks_like_sse_payload(text: str) -> bool:
+    stripped = text.lstrip()
+    return stripped.startswith("data:")
+
+
+def _to_text(value: object) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text") or item.get("content")
+                if isinstance(text, str):
+                    parts.append(text)
+        joined = "".join(parts).strip()
+        return joined or None
+    if isinstance(value, dict):
+        text = value.get("text") or value.get("content")
+        if isinstance(text, str):
+            return text
+    return None
+
+
 def _extract_text_from_messages(messages: list[dict]) -> tuple[str | None, str | None]:
     """Extract system prompt and last user message from messages list."""
     system_prompt: str | None = None
@@ -118,7 +146,7 @@ class OpenAICompatExtractor(BaseExtractor):
         result.status = "success"
 
         if response_body:
-            if is_stream:
+            if is_stream or _looks_like_sse_payload(response_body):
                 self._parse_stream_response(result, response_body, path)
             else:
                 self._parse_sync_response(result, response_body, path)
@@ -142,7 +170,10 @@ class OpenAICompatExtractor(BaseExtractor):
             choice = choices[0]
             result.finish_reason = choice.get("finish_reason")
             msg = choice.get("message") or {}
-            result.assistant_response = msg.get("content") or choice.get("text")
+            if isinstance(msg, dict):
+                result.assistant_response = _to_text(msg.get("content"))
+            if not result.assistant_response:
+                result.assistant_response = _to_text(choice.get("text"))
 
     def _parse_stream_response(self, result: ExtractionResult, body: str, path: str) -> None:
         chunks = _parse_sse_chunks(body)
@@ -163,9 +194,12 @@ class OpenAICompatExtractor(BaseExtractor):
                 choice = choices[0]
                 result.finish_reason = choice.get("finish_reason") or result.finish_reason
                 delta = choice.get("delta", {})
-                content = delta.get("content")
+                content = _to_text(delta.get("content"))
                 if content:
                     content_parts.append(content)
+                reasoning = _to_text(delta.get("reasoning_content") or delta.get("reasoning"))
+                if reasoning:
+                    content_parts.append(reasoning)
 
         if content_parts:
             result.assistant_response = "".join(content_parts)

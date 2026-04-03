@@ -187,6 +187,48 @@ class TestListConversations:
         assert data["total"] == 1
         assert data["items"][0]["id"] == "conv-1"
 
+    def test_filter_by_path_prefix(self, client: TestClient, store: AnalyticsStore):
+        conv1 = _make_conv(1)
+        conv1["path"] = "/v1/chat/completions"
+        store.upsert_conversation(conv1)
+        conv2 = _make_conv(2)
+        conv2["path"] = "/ui/login"
+        store.upsert_conversation(conv2)
+
+        r = client.get("/api/conversations?path_prefix=/v1/")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["total"] == 1
+        assert data["items"][0]["path"] == "/v1/chat/completions"
+
+    def test_filter_by_request_type(self, client: TestClient, store: AnalyticsStore):
+        conv1 = _make_conv(1)
+        conv1["request_type"] = "chat"
+        store.upsert_conversation(conv1)
+        conv2 = _make_conv(2)
+        conv2["request_type"] = "embedding"
+        store.upsert_conversation(conv2)
+
+        r = client.get("/api/conversations?request_type=chat")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["total"] == 1
+        assert data["items"][0]["request_type"] == "chat"
+
+    def test_list_includes_prompt_completion_preview_fields(self, client: TestClient, store: AnalyticsStore):
+        conv = _make_conv(1)
+        conv["user_prompt"] = "user prompt example"
+        conv["assistant_response"] = "assistant response example"
+        store.upsert_conversation(conv)
+
+        r = client.get("/api/conversations")
+        assert r.status_code == 200
+        item = r.json()["items"][0]
+        assert "user_prompt_preview" in item
+        assert "assistant_response_preview" in item
+        assert item["user_prompt_preview"] == "user prompt example"
+        assert item["assistant_response_preview"] == "assistant response example"
+
 
 class TestGetConversation:
     def test_get_existing(self, client: TestClient, store: AnalyticsStore):
