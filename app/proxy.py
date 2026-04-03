@@ -217,6 +217,10 @@ class ProxyHandler:
         # Check if we should record this request
         should_record = self.config.recording_filter.should_record(path)
 
+        client_ip = request.client.host if request.client else None
+        client_port = request.client.port if request.client else None
+        upstream_url = self.config.upstream_url
+
         if should_record:
             self.recorder.record_request(
                 request_id=request_id,
@@ -225,6 +229,9 @@ class ProxyHandler:
                 query_string=query_string or "",
                 headers=dict(fwd_headers),
                 body=body if body else None,
+                client_ip=client_ip,
+                client_port=client_port,
+                upstream_url=upstream_url,
             )
 
         try:

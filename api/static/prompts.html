@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Prompts — LLM Proxy Analytics</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <nav class="navbar">
+    <span class="brand">LLM Proxy Analytics</span>
+    <ul>
+      <li><a href="/">Overview</a></li>
+      <li><a href="/conversations.html">Conversations</a></li>
+      <li><a href="/costs.html">Costs</a></li>
+      <li><a href="/prompts.html" class="active">Prompts</a></li>
+      <li><a href="/errors.html">Errors</a></li>
+    </ul>
+  </nav>
+  <main class="container">
+    <h1>Prompt Templates</h1>
+    <table class="data-table">
+      <thead><tr><th>Template ID</th><th>Uses</th><th>Avg Cost</th><th>Last Seen</th><th>Preview</th></tr></thead>
+      <tbody id="prompts-tbody"></tbody>
+    </table>
+  </main>
+  <script src="app.js"></script>
+  <script>window.addEventListener('load', loadPromptsPage);</script>
+</body>
+</html>

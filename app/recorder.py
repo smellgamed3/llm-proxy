@@ -15,19 +15,51 @@ from .config import Config
 logger = logging.getLogger("llm-proxy.recorder")
 
 
+class SeqGenerator:
+    """Thread-safe monotonically increasing sequence number generator."""
+
+    def __init__(self, initial: int = 0):
+        self._value = initial
+        self._lock = threading.Lock()
+
+    def next(self) -> int:
+        with self._lock:
+            self._value += 1
+            return self._value
+
+    @classmethod
+    def from_db(cls, conn: sqlite3.Connection, table: str) -> "SeqGenerator":
+        """Initialize from the MAX(seq) value in the given table."""
+        try:
+            row = conn.execute(f"SELECT MAX(seq) FROM {table}").fetchone()
+            initial = row[0] if row and row[0] is not None else 0
+        except Exception:
+            initial = 0
+        return cls(initial)
+
+
 class Recorder:
     """Records HTTP request/response pairs to SQLite (metadata) + JSONL (bodies)."""
 
     def __init__(self, config: Config):
         self.config = config
         self.log_dir = Path(config.log_dir)
-        # log_dir is created by Config.__post_init__; Recorder just records the path
 
-        self.db_path = self.log_dir / "proxy.db"
-        self.jsonl_path = self.log_dir / "bodies.jsonl"
+        self.db_path = self.log_dir / "raw.db"
+        self.bodies_dir = self.log_dir / "bodies"
 
         self._local = threading.local()
+        self._jsonl_lock = threading.Lock()
         self._init_db()
+        self._seq = SeqGenerator.from_db(self._get_conn(), "raw_requests")
+        self._ws_seq = SeqGenerator.from_db(self._get_conn(), "raw_ws_connections")
+
+    @property
+    def jsonl_path(self) -> Path:
+        """Current JSONL file path (for backwards compatibility)."""
+        now = datetime.now(timezone.utc)
+        fname = now.strftime("%Y-%m-%d-%H") + ".jsonl"
+        return self.bodies_dir / fname
 
     def _get_conn(self) -> sqlite3.Connection:
         if not hasattr(self._local, "conn") or self._local.conn is None:
@@ -38,32 +70,39 @@ class Recorder:
         return self._local.conn
 
     def _init_db(self):
+        self.bodies_dir.mkdir(parents=True, exist_ok=True)
         conn = self._get_conn()
         conn.executescript("""
-            CREATE TABLE IF NOT EXISTS requests (
-                id              TEXT PRIMARY KEY,
-                timestamp       TEXT NOT NULL,
-                method          TEXT NOT NULL,
-                path            TEXT NOT NULL,
-                query_string    TEXT,
-                request_headers TEXT,
-                request_body_ref TEXT,
-                status_code     INTEGER,
-                response_headers TEXT,
-                response_body_ref TEXT,
-                is_stream       INTEGER DEFAULT 0,
-                duration_ms     REAL,
-                model           TEXT,
-                provider        TEXT,
-                error           TEXT,
-                created_at      TEXT DEFAULT (datetime('now'))
+            CREATE TABLE IF NOT EXISTS raw_requests (
+                id                   TEXT PRIMARY KEY,
+                seq                  INTEGER UNIQUE,
+                timestamp            TEXT NOT NULL,
+                method               TEXT NOT NULL,
+                path                 TEXT NOT NULL,
+                query_string         TEXT,
+                request_headers      TEXT,
+                request_body_ref     TEXT,
+                request_body_size    INTEGER,
+                status_code          INTEGER,
+                response_headers     TEXT,
+                response_body_ref    TEXT,
+                response_body_size   INTEGER,
+                is_stream            INTEGER DEFAULT 0,
+                duration_ms          REAL,
+                client_ip            TEXT,
+                client_port          INTEGER,
+                upstream_url         TEXT,
+                provider             TEXT,
+                error                TEXT,
+                created_at           TEXT DEFAULT (datetime('now'))
             );
-            CREATE INDEX IF NOT EXISTS idx_requests_timestamp ON requests(timestamp);
-            CREATE INDEX IF NOT EXISTS idx_requests_model ON requests(model);
-            CREATE INDEX IF NOT EXISTS idx_requests_path ON requests(path);
+            CREATE INDEX IF NOT EXISTS idx_raw_requests_timestamp ON raw_requests(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_raw_requests_path ON raw_requests(path);
+            CREATE INDEX IF NOT EXISTS idx_raw_requests_seq ON raw_requests(seq);
 
-            CREATE TABLE IF NOT EXISTS ws_connections (
+            CREATE TABLE IF NOT EXISTS raw_ws_connections (
                 id              TEXT PRIMARY KEY,
+                seq             INTEGER UNIQUE,
                 timestamp       TEXT NOT NULL,
                 path            TEXT NOT NULL,
                 query_string    TEXT,
@@ -71,29 +110,39 @@ class Recorder:
                 subprotocol     TEXT,
                 closed_at       TEXT,
                 duration_ms     REAL,
-                message_count   INTEGER DEFAULT 0
+                message_count   INTEGER DEFAULT 0,
+                client_ip       TEXT,
+                client_port     INTEGER
             );
-            CREATE INDEX IF NOT EXISTS idx_ws_timestamp ON ws_connections(timestamp);
-            CREATE INDEX IF NOT EXISTS idx_ws_path ON ws_connections(path);
+            CREATE INDEX IF NOT EXISTS idx_raw_ws_timestamp ON raw_ws_connections(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_raw_ws_path ON raw_ws_connections(path);
+            CREATE INDEX IF NOT EXISTS idx_raw_ws_seq ON raw_ws_connections(seq);
 
-            CREATE TABLE IF NOT EXISTS ws_messages (
+            CREATE TABLE IF NOT EXISTS raw_ws_messages (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
                 connection_id   TEXT NOT NULL,
                 direction       TEXT NOT NULL,
                 message_type    TEXT NOT NULL,
                 data            TEXT,
+                data_size       INTEGER,
                 timestamp       TEXT NOT NULL,
-                FOREIGN KEY (connection_id) REFERENCES ws_connections(id)
+                FOREIGN KEY (connection_id) REFERENCES raw_ws_connections(id)
             );
-            CREATE INDEX IF NOT EXISTS idx_ws_messages_conn ON ws_messages(connection_id);
+            CREATE INDEX IF NOT EXISTS idx_raw_ws_messages_conn ON raw_ws_messages(connection_id);
         """)
         conn.commit()
 
     def new_request_id(self) -> str:
         return str(uuid.uuid4())
 
-    def _write_jsonl(self, record_id: str, direction: str, data: Any) -> str:
-        """Write a body to the JSONL file. Returns a reference string."""
+    def _current_jsonl_path(self) -> Path:
+        """Return the path for the current hour's JSONL shard."""
+        now = datetime.now(timezone.utc)
+        fname = now.strftime("%Y-%m-%d-%H") + ".jsonl"
+        return self.bodies_dir / fname
+
+    def _write_jsonl(self, record_id: str, direction: str, data: Any) -> tuple[str, int]:
+        """Write a body to the hourly JSONL shard. Returns (ref, data_size)."""
         ref = f"{record_id}:{direction}"
         body_str = data if isinstance(data, str) else ""
         if isinstance(data, bytes):
@@ -101,6 +150,8 @@ class Recorder:
                 body_str = data.decode("utf-8")
             except UnicodeDecodeError:
                 body_str = f"<binary {len(data)} bytes>"
+
+        original_size = len(body_str.encode("utf-8"))
 
         # Truncate if too large
         if len(body_str) > self.config.max_body_log_size:
@@ -111,22 +162,27 @@ class Recorder:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "data": body_str,
         }, ensure_ascii=False)
+        line_bytes = (line + "\n").encode("utf-8")
 
-        with open(self.jsonl_path, "a", encoding="utf-8") as f:
-            f.write(line + "\n")
+        jsonl_path = self._current_jsonl_path()
 
-        return ref
+        with self._jsonl_lock:
+            offset = jsonl_path.stat().st_size if jsonl_path.exists() else 0
+            with open(jsonl_path, "ab") as f:
+                f.write(line_bytes)
 
-    def _extract_model(self, body: str | bytes | None) -> str | None:
-        """Try to extract model name from request body."""
-        if not body:
-            return None
-        try:
-            text = body if isinstance(body, str) else body.decode("utf-8")
-            data = json.loads(text)
-            return data.get("model")
-        except Exception:
-            return None
+            # Update manifest
+            manifest_path = self.bodies_dir / "manifest.jsonl"
+            manifest_entry = json.dumps({
+                "ref": ref,
+                "file": jsonl_path.name,
+                "offset": offset,
+                "length": len(line_bytes),
+            }, ensure_ascii=False)
+            with open(manifest_path, "a", encoding="utf-8") as mf:
+                mf.write(manifest_entry + "\n")
+
+        return ref, original_size
 
     def record_request(
         self,
@@ -136,28 +192,36 @@ class Recorder:
         query_string: str,
         headers: dict,
         body: bytes | None,
+        client_ip: str | None = None,
+        client_port: int | None = None,
+        upstream_url: str | None = None,
     ) -> None:
         """Record the incoming request."""
         body_ref = None
+        body_size = None
         if body:
-            body_ref = self._write_jsonl(request_id, "request", body)
+            body_ref, body_size = self._write_jsonl(request_id, "request", body)
 
-        model = self._extract_model(body)
-
+        seq = self._seq.next()
         conn = self._get_conn()
         conn.execute(
-            """INSERT INTO requests (id, timestamp, method, path, query_string,
-               request_headers, request_body_ref, model)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO raw_requests (id, seq, timestamp, method, path, query_string,
+               request_headers, request_body_ref, request_body_size,
+               client_ip, client_port, upstream_url)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 request_id,
+                seq,
                 datetime.now(timezone.utc).isoformat(),
                 method,
                 path,
                 query_string,
                 json.dumps(dict(headers), ensure_ascii=False),
                 body_ref,
-                model,
+                body_size,
+                client_ip,
+                client_port,
+                upstream_url,
             ),
         )
         conn.commit()
@@ -175,19 +239,21 @@ class Recorder:
     ) -> None:
         """Record the response (called after full response is received/streamed)."""
         body_ref = None
+        body_size = None
         if body:
-            body_ref = self._write_jsonl(request_id, "response", body)
+            body_ref, body_size = self._write_jsonl(request_id, "response", body)
 
         conn = self._get_conn()
         conn.execute(
-            """UPDATE requests SET
+            """UPDATE raw_requests SET
                status_code = ?, response_headers = ?, response_body_ref = ?,
-               is_stream = ?, duration_ms = ?, error = ?
+               response_body_size = ?, is_stream = ?, duration_ms = ?, error = ?
                WHERE id = ?""",
             (
                 status_code,
                 json.dumps(dict(headers), ensure_ascii=False),
                 body_ref,
+                body_size,
                 1 if is_stream else 0,
                 duration_ms,
                 error,
@@ -199,11 +265,11 @@ class Recorder:
 
     def record_stream_body(self, request_id: str, accumulated_body: str) -> None:
         """Update the response body for a streamed response after completion."""
-        body_ref = self._write_jsonl(request_id, "response", accumulated_body)
+        body_ref, body_size = self._write_jsonl(request_id, "response", accumulated_body)
         conn = self._get_conn()
         conn.execute(
-            "UPDATE requests SET response_body_ref = ? WHERE id = ?",
-            (body_ref, request_id),
+            "UPDATE raw_requests SET response_body_ref = ?, response_body_size = ? WHERE id = ?",
+            (body_ref, body_size, request_id),
         )
         conn.commit()
 
@@ -218,19 +284,26 @@ class Recorder:
         query_string: str,
         headers: dict,
         subprotocol: str | None,
+        client_ip: str | None = None,
+        client_port: int | None = None,
     ) -> None:
+        seq = self._ws_seq.next()
         conn = self._get_conn()
         conn.execute(
-            """INSERT INTO ws_connections
-               (id, timestamp, path, query_string, request_headers, subprotocol)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO raw_ws_connections
+               (id, seq, timestamp, path, query_string, request_headers, subprotocol,
+                client_ip, client_port)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 conn_id,
+                seq,
                 datetime.now(timezone.utc).isoformat(),
                 path,
                 query_string,
                 json.dumps(dict(headers), ensure_ascii=False),
                 subprotocol,
+                client_ip,
+                client_port,
             ),
         )
         conn.commit()
@@ -244,25 +317,27 @@ class Recorder:
         data: str | bytes,
         max_size: int,
     ) -> None:
+        data_size: int
         if isinstance(data, bytes):
-            # Store binary as base64
+            data_size = len(data)
             raw = data[:max_size]
             text = base64.b64encode(raw).decode("ascii")
             if len(data) > max_size:
                 text += f" [truncated, original {len(data)} bytes]"
         else:
+            data_size = len(data.encode("utf-8"))
             text = data[:max_size]
             if len(data) > max_size:
                 text += f"\n... [truncated at {max_size}]"
 
         conn = self._get_conn()
         conn.execute(
-            """INSERT INTO ws_messages (connection_id, direction, message_type, data, timestamp)
-               VALUES (?, ?, ?, ?, ?)""",
-            (conn_id, direction, message_type, text, datetime.now(timezone.utc).isoformat()),
+            """INSERT INTO raw_ws_messages (connection_id, direction, message_type, data, data_size, timestamp)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (conn_id, direction, message_type, text, data_size, datetime.now(timezone.utc).isoformat()),
         )
         conn.execute(
-            "UPDATE ws_connections SET message_count = message_count + 1 WHERE id = ?",
+            "UPDATE raw_ws_connections SET message_count = message_count + 1 WHERE id = ?",
             (conn_id,),
         )
         conn.commit()
@@ -270,7 +345,7 @@ class Recorder:
     def record_ws_close(self, conn_id: str, duration_ms: float) -> None:
         conn = self._get_conn()
         conn.execute(
-            """UPDATE ws_connections SET closed_at = ?, duration_ms = ? WHERE id = ?""",
+            """UPDATE raw_ws_connections SET closed_at = ?, duration_ms = ? WHERE id = ?""",
             (datetime.now(timezone.utc).isoformat(), duration_ms, conn_id),
         )
         conn.commit()

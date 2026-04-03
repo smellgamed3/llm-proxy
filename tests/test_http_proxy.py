@@ -103,7 +103,7 @@ class TestHealthEndpoint:
         )
         client.get("/health")
         # /health is handled locally, never reaches proxy handler
-        assert db_rows(rec, "requests") == []
+        assert db_rows(rec, "raw_requests") == []
 
 
 class TestHTTPProxyForwarding:
@@ -360,11 +360,12 @@ class TestHTTPRecording:
         client, _, rec = make_proxy_with_upstream(tmp_path, upstream)
 
         client.post("/v1/chat/completions", json={"model": "gpt-4"})
-        rows = db_rows(rec, "requests")
+        rows = db_rows(rec, "raw_requests")
         assert len(rows) == 1
         assert rows[0]["path"] == "/v1/chat/completions"
         assert rows[0]["method"] == "POST"
-        assert rows[0]["model"] == "gpt-4"
+        # model is not extracted at the recorder level; check body is stored
+        assert rows[0]["request_body_ref"] is not None
 
     def test_response_recorded(self, tmp_path: Path):
         async def ok(req: Request):
@@ -374,7 +375,7 @@ class TestHTTPRecording:
         client, _, rec = make_proxy_with_upstream(tmp_path, upstream)
 
         client.post("/v1/chat", json={"model": "m"})
-        rows = db_rows(rec, "requests")
+        rows = db_rows(rec, "raw_requests")
         assert rows[0]["status_code"] == 200
         assert rows[0]["duration_ms"] > 0
 
@@ -401,7 +402,7 @@ class TestRecordingFilter:
         client, _, rec = make_proxy_with_upstream(tmp_path, upstream, recording_filter=filt)
 
         client.get("/v1/models")
-        assert db_rows(rec, "requests") == []
+        assert db_rows(rec, "raw_requests") == []
 
     def test_excluded_path_still_forwarded(self, tmp_path: Path):
         """Even excluded paths are forwarded — just not recorded."""
@@ -425,7 +426,7 @@ class TestRecordingFilter:
 
         client.get("/v1/chat/completions")
         client.get("/v1/models")  # not in include
-        rows = db_rows(rec, "requests")
+        rows = db_rows(rec, "raw_requests")
         assert len(rows) == 1
         assert rows[0]["path"] == "/v1/chat/completions"
 
@@ -466,7 +467,7 @@ class TestSSEProxy:
         client, _, rec = make_proxy_with_upstream(tmp_path, upstream)
 
         client.post("/v1/chat/completions", json={"model": "gpt-4", "stream": True})
-        rows = db_rows(rec, "requests")
+        rows = db_rows(rec, "raw_requests")
         assert rows[0]["is_stream"] == 1
         bodies = jsonl_bodies(rec)
         resp_bodies = [b for b in bodies if b["ref"].endswith(":response")]

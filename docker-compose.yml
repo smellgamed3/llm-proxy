@@ -14,9 +14,48 @@ services:
     volumes:
       - llm-proxy-logs:/data/logs
       - ./config.yaml:/etc/llm-proxy/config.yaml:ro
-    # depends_on:
-    #   - llm-provider  # uncomment and set your downstream service
+      - ./pricing.yaml:/etc/llm-proxy/pricing.yaml:ro
+
+  analyzer:
+    build:
+      context: .
+      dockerfile: Dockerfile.analyzer
+    container_name: llm-analyzer
+    restart: unless-stopped
+    environment:
+      RAW_DB: /data/logs/raw.db
+      ANALYTICS_DB: /data/analytics/analytics.db
+      BODIES_DIR: /data/logs/bodies
+      PRICING_FILE: /etc/llm-proxy/pricing.yaml
+      ANALYZER_INTERVAL: "5"
+      ANALYZER_BATCH_SIZE: "100"
+    volumes:
+      - llm-proxy-logs:/data/logs
+      - llm-analytics:/data/analytics
+      - ./pricing.yaml:/etc/llm-proxy/pricing.yaml:ro
+    depends_on:
+      - llm-proxy
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: llm-analytics-api
+    restart: unless-stopped
+    ports:
+      - "${API_PORT:-9091}:9091"
+    environment:
+      RAW_DB: /data/logs/raw.db
+      ANALYTICS_DB: /data/analytics/analytics.db
+      BODIES_DIR: /data/logs/bodies
+    volumes:
+      - llm-proxy-logs:/data/logs
+      - llm-analytics:/data/analytics
+    depends_on:
+      - analyzer
 
 volumes:
   llm-proxy-logs:
+    driver: local
+  llm-analytics:
     driver: local

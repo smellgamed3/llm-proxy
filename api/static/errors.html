@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Errors — LLM Proxy Analytics</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <nav class="navbar">
+    <span class="brand">LLM Proxy Analytics</span>
+    <ul>
+      <li><a href="/">Overview</a></li>
+      <li><a href="/conversations.html">Conversations</a></li>
+      <li><a href="/costs.html">Costs</a></li>
+      <li><a href="/prompts.html">Prompts</a></li>
+      <li><a href="/errors.html" class="active">Errors</a></li>
+    </ul>
+  </nav>
+  <main class="container">
+    <h1>Errors</h1>
+    <div id="error-summary" class="cards"></div>
+    <section>
+      <h2>Recent Errors</h2>
+      <table class="data-table">
+        <thead><tr><th>Timestamp</th><th>Model</th><th>Error Type</th><th>Status</th><th>Message</th></tr></thead>
+        <tbody id="errors-tbody"></tbody>
+      </table>
+    </section>
+  </main>
+  <script src="app.js"></script>
+  <script>window.addEventListener('load', loadErrorsPage);</script>
+</body>
+</html>
