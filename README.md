@@ -1,14 +1,39 @@
 # LLM Proxy
 
-透明 HTTP 反向代理，用于记录 LLM API 请求/响应数据（含 SSE 流式），方便后续分析。
+透明 HTTP 反向代理 + 流量分析系统，用于记录和分析 LLM API 请求/响应数据（含 SSE 流式和 WebSocket）。
+
+提供提示词提取、Token 用量统计、成本计算、延迟分析、成功/失败分类等能力，并通过 RESTful API 和 Dashboard 对外提供查询服务。
 
 ## 架构
 
 ```
-Client → HTTPS Proxy → [llm-proxy :9090] → LLM Provider API
-                             ↓
-                        SQLite + JSONL 日志
+ Client ───→ [llm-proxy :9090] ───→ Upstream LLM
+                    │
+                    │ sync write (<1ms)
+                    ▼
+       ┌────────────────────────────┐
+       │   Raw Store (raw.db +      │
+       │   bodies/*.jsonl)          │
+       └─────────────┬──────────────┘
+                     │ async poll (5s)
+                     ▼
+       ┌────────────────────────────┐
+       │   Analyzer Worker          │
+       │   (提取/成本/指纹/分类)     │
+       └─────────────┬──────────────┘
+                     │
+                     ▼
+       ┌────────────────────────────┐
+       │   Analytics (analytics.db) │
+       └─────────────┬──────────────┘
+                     │
+          ┌──────────┴──────────┐
+          ▼                     ▼
+    Dashboard :9091       Query API :9091
+    (管理/调试)           (业务系统集成)
 ```
+
+三个独立进程：**代理**（录制）→ **分析 Worker**（提取）→ **API + Dashboard**（查询），互不影响。
 
 ## 快速开始
 
@@ -18,23 +43,40 @@ Client → HTTPS Proxy → [llm-proxy :9090] → LLM Provider API
 # 设置上游地址
 export UPSTREAM_URL=http://your-llm-service:8080
 
-# 启动
+# 启动全部服务（代理 + 分析 + API）
 docker compose up -d
 
 # 查看日志
-docker compose logs -f llm-proxy
+docker compose logs -f
 ```
 
-### 本地运行
+服务启动后：
+
+| 服务 | 地址 |
+|------|------|
+| 代理端点 | `http://localhost:9090` |
+| 健康检查 | `http://localhost:9090/health` |
+| Dashboard | `http://localhost:9091/` |
+| API 文档 | `http://localhost:9091/docs` |
+
+### 本地开发
 
 ```bash
-# 安装依赖（自动创建 .venv）
+# 安装依赖
 uv sync
 
-UPSTREAM_URL=http://localhost:8080 \
-LOG_DIR=./logs \
-CONFIG_FILE=./config.yaml \
+# 启动代理
+UPSTREAM_URL=http://localhost:8080 LOG_DIR=./logs CONFIG_FILE=./config.yaml \
 uv run uvicorn app.main:create_app --factory --host 0.0.0.0 --port 9090
+
+# 启动分析 Worker（另一个终端）
+RAW_DB=./logs/raw.db ANALYTICS_DB=./logs/analytics.db \
+BODIES_DIR=./logs/bodies PRICING_FILE=./pricing.yaml \
+uv run python -m analyzer
+
+# 启动 API（另一个终端）
+ANALYTICS_DB=./logs/analytics.db RAW_DB=./logs/raw.db BODIES_DIR=./logs/bodies \
+uv run uvicorn api.app:create_app --factory --host 0.0.0.0 --port 9091
 ```
 
 ## 配置
@@ -45,7 +87,7 @@ uv run uvicorn app.main:create_app --factory --host 0.0.0.0 --port 9090
 |------|--------|------|
 | `UPSTREAM_URL` | `http://localhost:8080` | 下游 LLM 服务地址 |
 | `LISTEN_PORT` | `9090` | 代理监听端口 |
-| `LOG_DIR` | `/data/logs` | 日志存储目录 |
+| `LOG_DIR` | `/data/logs` | 原始数据存储目录 |
 | `LOG_LEVEL` | `INFO` | 日志级别 |
 | `MAX_BODY_LOG_SIZE` | `10485760` | 单个 body 最大记录字节数 |
 | `PRESERVE_HOST` | `true` | 是否将客户端 `Host` 原样透传给下游 |
@@ -53,7 +95,7 @@ uv run uvicorn app.main:create_app --factory --host 0.0.0.0 --port 9090
 
 ### 配置文件 (`config.yaml`)
 
-配置文件用于设置路径过滤规则，并控制反向代理行为：
+控制代理行为和录制过滤规则：
 
 ```yaml
 preserve_host: true
@@ -78,9 +120,29 @@ recording:
 2. 匹配 `exclude` 的路径永远不记录（优先级高于 include）
 3. 两者都为空 → 记录所有请求
 
+### 模型定价 (`pricing.yaml`)
+
+用于成本计算，价格单位为美元/百万 token：
+
+```yaml
+models:
+  gpt-4o:
+    input_per_1m: 2.50
+    output_per_1m: 10.00
+  gpt-4o-mini:
+    input_per_1m: 0.15
+    output_per_1m: 0.60
+
+default:
+  input_per_1m: 1.00
+  output_per_1m: 5.00
+```
+
+修改后无需重启 Worker，自动热更新。
+
 ### 代理兼容规则
 
-为了尽量贴近 Nginx / Caddy / Traefik 等成熟反向代理，当前实现默认会：
+贴近 Nginx / Caddy / Traefik 等成熟反向代理的行为：
 
 - 透传原始 `Host`（可通过 `PRESERVE_HOST=false` 关闭）
 - 补齐 `Forwarded`、`X-Forwarded-*`、`X-Real-IP`
@@ -91,34 +153,73 @@ recording:
 
 ## 数据存储
 
-日志存储在 `LOG_DIR` 目录下：
+### 原始数据（Raw Store）
 
-- **`proxy.db`** — SQLite 数据库，存储请求元数据（时间、路径、状态码、模型名、耗时等）
-- **`bodies.jsonl`** — JSONL 文件，存储完整的请求/响应 body
+存储在 `LOG_DIR` 目录下，由代理层写入，**不做任何 JSON 解析**：
+
+- **`raw.db`** — SQLite 数据库（WAL 模式），存储请求/响应元数据
+- **`bodies/*.jsonl`** — 按小时分片的 JSONL 文件，存储完整的请求/响应 body
+- **`bodies/manifest.jsonl`** — body 文件索引，确保数据引用不丢失
+
+### 分析数据（Analytics Store）
+
+由 Analyzer Worker 异步生成，可随时删除并从原始数据重建：
+
+- **`analytics.db`** — SQLite 数据库，存储结构化分析结果（模型、token、成本、延迟、提示词指纹等）
 
 ### 查询示例
 
 ```bash
-# 进入容器查询
-docker compose exec llm-proxy sqlite3 /data/logs/proxy.db
+# 查询原始数据
+docker compose exec llm-proxy sqlite3 /data/logs/raw.db \
+  "SELECT seq, method, path, status_code, duration_ms
+   FROM raw_requests ORDER BY seq DESC LIMIT 10;"
 
-# 最近 10 条请求
-SELECT id, timestamp, method, path, status_code, model, duration_ms
-FROM requests ORDER BY timestamp DESC LIMIT 10;
-
-# 按模型统计
-SELECT model, COUNT(*) as cnt, AVG(duration_ms) as avg_ms
-FROM requests GROUP BY model;
-
-# 查看慢请求
-SELECT * FROM requests WHERE duration_ms > 5000 ORDER BY duration_ms DESC;
+# 查询分析数据
+docker compose exec api sqlite3 /data/analytics/analytics.db \
+  "SELECT model, COUNT(*) as cnt, SUM(estimated_cost_usd) as cost,
+          AVG(duration_ms) as avg_ms
+   FROM conversations GROUP BY model;"
 ```
+
+## 分析 Worker
+
+独立进程，异步从原始数据提取结构化信息。支持三种运行模式：
+
+```bash
+# 增量模式（默认，守护进程持续运行）
+docker compose exec analyzer python -m analyzer
+
+# 全量重跑（清空 analytics.db，从头重建）
+docker compose exec analyzer python -m analyzer --mode=full
+
+# 范围重跑（指定时间段）
+docker compose exec analyzer python -m analyzer --mode=range \
+  --since=2026-04-01 --until=2026-04-03
+```
+
+## Query API
+
+RESTful JSON API，供 Dashboard 和业务系统使用：
+
+| 端点 | 说明 |
+|------|------|
+| `GET /api/overview` | 总览（请求量、成功率、总成本、平均延迟） |
+| `GET /api/conversations` | 对话列表（支持 model/status/date/关键词过滤和分页） |
+| `GET /api/conversations/:id` | 对话详情（含完整 prompt + response） |
+| `GET /api/conversations/:id/raw` | 回溯原始请求/响应 body |
+| `GET /api/costs` | 成本分析（按模型/日期/provider 汇总） |
+| `GET /api/latency` | 延迟分析（P50/P95/P99） |
+| `GET /api/prompts/templates` | 提示词模板列表 |
+| `GET /api/models/stats` | 按模型维度统计 |
+| `GET /api/errors` | 错误列表 |
+
+完整 API 文档：`http://localhost:9091/docs`
 
 ## 与其他 Compose 服务集成
 
 ```yaml
 services:
-  # 你的 HTTPS 前端代理指向 llm-proxy:9090
   nginx:
     image: nginx
     # proxy_pass http://llm-proxy:9090;
@@ -138,6 +239,21 @@ services:
 ## 健康检查
 
 ```bash
+# 代理
 curl http://localhost:9090/health
-# {"status": "ok"}
+# → {"status": "ok"}
+
+# 分析 Worker 状态
+curl http://localhost:9091/api/admin/analyzer/status
+# → {"mode": "incremental", "last_seq": 12345, ...}
 ```
+
+## 文档
+
+详细设计和运维文档见 [docs/](docs/README.md)：
+
+- [项目需求规格](docs/01-requirements.md)
+- [技术架构设计](docs/02-architecture.md)
+- [开发测试验收计划](docs/03-development-plan.md)
+- [部署使用指南](docs/04-deployment.md)
+- [发布维护运维手册](docs/05-operations.md)
