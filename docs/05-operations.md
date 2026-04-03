@@ -10,8 +10,8 @@
 
 | 类型 | 适用场景 | 示例 |
 |------|----------|------|
-| PATCH | Bug 修复，安全补丁 | 0.2.0 → 0.2.1 |
-| MINOR | 新增 Extractor、API 端点、Dashboard 页面 | 0.2.1 → 0.3.0 |
+| PATCH | Bug 修复，安全补丁 | 0.2.2 → 0.2.3 |
+| MINOR | 新增 Extractor、API 端点、Dashboard 页面 | 0.2.3 → 0.3.0 |
 | MAJOR | DB schema 不兼容变更、API breaking change | 0.3.0 → 1.0.0 |
 
 版本号在 `pyproject.toml` 中统一管理。

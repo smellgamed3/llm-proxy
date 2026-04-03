@@ -14,6 +14,7 @@
 | 04 | [部署使用指南](04-deployment.md) | Docker Compose 部署、本地开发、配置说明、集成方式、快速验证 | 运维 / 使用者 |
 | 05 | [发布维护运维手册](05-operations.md) | 发布流程、备份恢复、监控告警、常见运维操作、故障排除 | 运维 |
 | 06 | [参考仓库规则落地说明](06-litellm-searchlog-rules.md) | litellm-searchlog 的解析提取规则与页面展示规则在本项目的映射与约束 | 开发者 / 运维 |
+| 07 | [Dashboard 改进与现状](07-dashboard-improvement.md) | Dashboard 已落地能力、增量改进记录、后续迭代方向 | 开发者 / 产品 / 运维 |
 
 ## 文档关系
 
@@ -39,3 +40,4 @@
 - **想部署或集成系统** → [04-deployment.md](04-deployment.md)
 - **想运维或排查问题** → [05-operations.md](05-operations.md)
 - **想看参考仓库规则如何在本项目落地** → [06-litellm-searchlog-rules.md](06-litellm-searchlog-rules.md)
+- **想看 Dashboard 当前能力和后续改进方向** → [07-dashboard-improvement.md](07-dashboard-improvement.md)
