@@ -1,7 +1,14 @@
 services:
+  llm-provider:
+    image: hashicorp/http-echo:1.0.0
+    container_name: llm-provider-prod
+    restart: unless-stopped
+    command: ["-listen=:8080", "-text={\"ok\":true}"]
+
   llm-proxy:
-    build: .
-    container_name: llm-proxy
+    image: ghcr.io/smellgamed3/llm-proxy:${APP_VERSION:-0.2.2}
+    pull_policy: always
+    container_name: llm-proxy-prod
     restart: unless-stopped
     ports:
       - "${PROXY_PORT:-9090}:9090"
@@ -15,12 +22,13 @@ services:
       - llm-proxy-logs:/data/logs
       - ./config.yaml:/etc/llm-proxy/config.yaml:ro
       - ./pricing.yaml:/etc/llm-proxy/pricing.yaml:ro
+    depends_on:
+      - llm-provider
 
   analyzer:
-    build:
-      context: .
-      dockerfile: Dockerfile.analyzer
-    container_name: llm-analyzer
+    image: ghcr.io/smellgamed3/llm-proxy-analyzer:${APP_VERSION:-0.2.2}
+    pull_policy: always
+    container_name: llm-analyzer-prod
     restart: unless-stopped
     environment:
       RAW_DB: /data/logs/raw.db
@@ -37,10 +45,9 @@ services:
       - llm-proxy
 
   api:
-    build:
-      context: .
-      dockerfile: Dockerfile.api
-    container_name: llm-analytics-api
+    image: ghcr.io/smellgamed3/llm-proxy-api:${APP_VERSION:-0.2.2}
+    pull_policy: always
+    container_name: llm-analytics-api-prod
     restart: unless-stopped
     ports:
       - "${API_PORT:-9091}:9091"

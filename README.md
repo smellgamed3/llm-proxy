@@ -254,7 +254,7 @@ curl http://localhost:9091/api/admin/analyzer/status
 
 ## 生产镜像 Smoke Test
 
-当使用 `docker-compose.prod.yaml` 拉取远端 GHCR 镜像启动后，可用一条脚本做端到端验收：
+当使用 `docker-compose.yml`（生产编排）拉取远端 GHCR 镜像启动后，可用一条脚本做端到端验收：
 
 ```bash
 bash scripts/smoke_prod.sh

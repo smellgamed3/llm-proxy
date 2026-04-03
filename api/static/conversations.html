@@ -19,52 +19,131 @@
   </nav>
   <main class="container">
     <h1>Conversations</h1>
-    <div class="filters">
-      <input type="text" id="q" placeholder="Search..." />
-      <input type="text" id="model-filter" placeholder="Model..." />
+
+    <section class="filters filters-advanced">
+      <input type="text" id="q" placeholder="Search prompt/response..." />
+      <input type="text" id="model-filter" placeholder="Model" />
+      <input type="text" id="template-filter" placeholder="Template ID" />
       <select id="status-filter">
         <option value="">All statuses</option>
         <option value="success">Success</option>
         <option value="error">Error</option>
       </select>
-      <button onclick="loadConversations(1)">Search</button>
-    </div>
+      <input type="date" id="date-from" aria-label="date from" />
+      <input type="date" id="date-to" aria-label="date to" />
+      <select id="sort-filter">
+        <option value="timestamp">Sort: Timestamp</option>
+        <option value="total_tokens">Sort: Total Tokens</option>
+        <option value="cost_usd">Sort: Cost</option>
+        <option value="duration_ms">Sort: Latency</option>
+      </select>
+      <select id="order-filter">
+        <option value="desc">DESC</option>
+        <option value="asc">ASC</option>
+      </select>
+      <select id="page-size-filter">
+        <option value="25">25 / page</option>
+        <option value="50" selected>50 / page</option>
+        <option value="100">100 / page</option>
+      </select>
+      <button type="button" onclick="loadConversations(1)">Apply</button>
+      <button type="button" class="ghost-btn" onclick="resetConversationFilters()">Reset</button>
+    </section>
+
+    <section class="cards conversation-insights" id="conversation-insights">
+      <div class="card">
+        <div class="card-value" id="insight-loaded">0</div>
+        <div class="card-label">Loaded Rows</div>
+      </div>
+      <div class="card">
+        <div class="card-value" id="insight-success">0%</div>
+        <div class="card-label">Success Rate (Page)</div>
+      </div>
+      <div class="card">
+        <div class="card-value" id="insight-avg-tokens">0</div>
+        <div class="card-label">Avg Tokens (Page)</div>
+      </div>
+      <div class="card">
+        <div class="card-value" id="insight-avg-latency">0</div>
+        <div class="card-label">Avg Latency ms (Page)</div>
+      </div>
+    </section>
+
     <table class="data-table" id="conv-table">
       <thead>
         <tr>
-          <th>Timestamp</th><th>Model</th><th>Status</th>
-          <th>Tokens</th><th>Cost</th><th>Latency (ms)</th>
+          <th>Timestamp</th>
+          <th>Model</th>
+          <th>Status</th>
+          <th>Type</th>
+          <th>Prompt / Completion</th>
+          <th>Total Tokens</th>
+          <th>Cost</th>
+          <th>Latency (ms)</th>
         </tr>
       </thead>
       <tbody id="conv-tbody"></tbody>
     </table>
+
     <div class="pagination" id="pagination"></div>
+
     <section class="detail-panel" id="conversation-detail" hidden>
       <div class="detail-header">
         <h2>Conversation Detail</h2>
         <button type="button" class="detail-close" onclick="hideConversationDetail()">Close</button>
       </div>
+
       <div class="detail-meta" id="detail-meta"></div>
+
+      <div class="token-breakdown" id="token-breakdown">
+        <h3>Token Breakdown</h3>
+        <div class="stacked-bar">
+          <div class="bar-prompt" id="bar-prompt"></div>
+          <div class="bar-completion" id="bar-completion"></div>
+        </div>
+        <div class="token-breakdown-meta" id="token-breakdown-meta"></div>
+      </div>
+
       <div class="detail-grid">
         <div>
           <h3>System Prompt</h3>
+          <div class="detail-actions"><button data-copy-target="detail-system-prompt">Copy</button></div>
           <pre id="detail-system-prompt"></pre>
         </div>
         <div>
           <h3>User Prompt</h3>
+          <div class="detail-actions"><button data-copy-target="detail-user-prompt">Copy</button></div>
           <pre id="detail-user-prompt"></pre>
         </div>
         <div>
           <h3>Assistant Response</h3>
+          <div class="detail-actions"><button data-copy-target="detail-assistant-response">Copy</button></div>
           <pre id="detail-assistant-response"></pre>
         </div>
         <div>
+          <h3>Prompt Optimization Hints</h3>
+          <ul class="analysis-list" id="detail-analysis"></ul>
+        </div>
+        <div>
+          <h3>Tool Calls</h3>
+          <pre id="detail-tools-list"></pre>
+        </div>
+      </div>
+
+      <div class="detail-grid two-column-raw">
+        <div>
           <h3>Raw Request Body</h3>
+          <div class="detail-actions"><button data-copy-target="detail-request-body">Copy</button></div>
           <pre id="detail-request-body"></pre>
+          <h3 class="subheading">Request Headers</h3>
+          <pre id="detail-request-headers"></pre>
         </div>
         <div>
           <h3>Raw Response Body</h3>
+          <div class="detail-actions"><button data-copy-target="detail-response-body">Copy</button></div>
           <pre id="detail-response-body"></pre>
+          <h3 class="subheading">Response Headers</h3>
+          <pre id="detail-response-headers"></pre>
         </div>
       </div>
     </section>

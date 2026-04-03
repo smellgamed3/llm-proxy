@@ -181,6 +181,25 @@ h2 {
   background: #2d2d4e;
 }
 
+.filters.filters-advanced {
+  background: linear-gradient(135deg, #ffffff 0%, #eef4ff 100%);
+  border: 1px solid #dbe6ff;
+  border-radius: 10px;
+  padding: 0.9rem;
+  margin-bottom: 1rem;
+  box-shadow: 0 6px 18px rgba(17, 36, 77, 0.08);
+}
+
+.filters .ghost-btn {
+  background: #ffffff;
+  color: #2d3e72;
+  border: 1px solid #c8d8ff;
+}
+
+.filters .ghost-btn:hover {
+  background: #f3f7ff;
+}
+
 .pagination {
   display: flex;
   justify-content: center;
@@ -215,6 +234,14 @@ h2 {
 .badge-error { background: #f8d7da; color: #721c24; }
 .badge-warning { background: #fff3cd; color: #856404; }
 
+.conversation-insights {
+  margin-bottom: 1.25rem;
+}
+
+.conversation-insights .card {
+  border: 1px solid #e8ecf7;
+}
+
 .detail-panel {
   background: #fff;
   border-radius: 8px;
@@ -247,6 +274,44 @@ h2 {
   font-size: 0.9rem;
 }
 
+.detail-meta span {
+  background: #f3f6fc;
+  border: 1px solid #e4ebfa;
+  border-radius: 999px;
+  padding: 0.22rem 0.55rem;
+}
+
+.token-breakdown {
+  margin-bottom: 1rem;
+  padding: 0.85rem;
+  border: 1px solid #e6ecfa;
+  border-radius: 8px;
+  background: #f9fbff;
+}
+
+.stacked-bar {
+  display: flex;
+  width: 100%;
+  height: 12px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: #e9eef8;
+}
+
+.bar-prompt {
+  background: linear-gradient(90deg, #4f46e5, #818cf8);
+}
+
+.bar-completion {
+  background: linear-gradient(90deg, #0ea5e9, #67e8f9);
+}
+
+.token-breakdown-meta {
+  margin-top: 0.45rem;
+  font-size: 0.85rem;
+  color: #41507a;
+}
+
 .detail-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
@@ -256,6 +321,25 @@ h2 {
 .detail-grid h3 {
   font-size: 0.95rem;
   margin-bottom: 0.5rem;
+}
+
+.detail-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 0.35rem;
+}
+
+.detail-actions button {
+  border: 1px solid #d6def0;
+  background: #fff;
+  padding: 0.24rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.74rem;
+  cursor: pointer;
+}
+
+.detail-actions button:hover {
+  background: #f1f5ff;
 }
 
 .detail-grid pre {
@@ -270,4 +354,28 @@ h2 {
   overflow: auto;
   font-size: 0.85rem;
   color: #1f2937;
+}
+
+.analysis-list {
+  list-style: disc;
+  padding-left: 1.1rem;
+  color: #1f2d50;
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+
+.analysis-list li {
+  margin-bottom: 0.4rem;
+}
+
+.subheading {
+  margin-top: 0.9rem;
+}
+
+@media (max-width: 960px) {
+  .data-table {
+    display: block;
+    overflow-x: auto;
+    white-space: nowrap;
+  }
 }
