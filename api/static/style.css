@@ -1189,10 +1189,188 @@ h2 {
 /* Section color coding */
 .section-icon-system { background: #fef3c7; color: #92400e; }
 .section-icon-tools { background: #ede9fe; color: #6d28d9; }
+.section-icon-skills { background: #e0f2fe; color: #0369a1; }
 .section-icon-history { background: #dbeafe; color: #1e40af; }
 .section-icon-user { background: #d1fae5; color: #065f46; }
 .section-icon-assistant { background: #e0e7ff; color: #3730a3; }
 .section-icon-hints { background: #fce7f3; color: #9d174d; }
+
+/* ── Skill Statistics ──────────────────────────────────────────── */
+.skill-stats-cards {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.65rem;
+  margin-bottom: 1rem;
+}
+
+.skill-stat-card {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 0.75rem 0.65rem;
+  text-align: center;
+}
+
+.skill-stat-value {
+  font-size: 1.35rem;
+  font-weight: 700;
+  color: #0369a1;
+}
+
+.skill-stat-label {
+  font-size: 0.7rem;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-top: 0.15rem;
+}
+
+.skill-section-title {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #475569;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 0.55rem;
+  margin-top: 0.85rem;
+}
+
+.skill-category-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 0.55rem;
+}
+
+.skill-category-card {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+}
+
+.skill-cat-header {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.3rem;
+}
+
+.skill-cat-icon {
+  font-size: 1rem;
+}
+
+.skill-cat-name {
+  font-weight: 600;
+  font-size: 0.82rem;
+  color: #1e293b;
+}
+
+.skill-cat-metrics {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.72rem;
+  color: #64748b;
+  margin-bottom: 0.3rem;
+}
+
+.skill-cat-divider {
+  color: #cbd5e1;
+}
+
+.skill-cat-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.skill-tool-badge {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-family: 'SF Mono', Consolas, monospace;
+}
+
+.skill-tool-used {
+  background: #dbeafe;
+  color: #1e40af;
+  border: 1px solid #93c5fd;
+}
+
+.skill-tool-unused {
+  background: #f1f5f9;
+  color: #94a3b8;
+  border: 1px solid #e2e8f0;
+}
+
+/* Frequency bar chart */
+.skill-freq-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.skill-freq-row {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.78rem;
+}
+
+.skill-freq-icon {
+  flex-shrink: 0;
+  width: 1.2rem;
+  text-align: center;
+}
+
+.skill-freq-name {
+  min-width: 140px;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #334155;
+  font-family: 'SF Mono', Consolas, monospace;
+  font-size: 0.73rem;
+}
+
+.skill-freq-bar-bg {
+  flex: 1;
+  height: 14px;
+  background: #f1f5f9;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.skill-freq-bar {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+.skill-freq-cat-file-read { background: linear-gradient(90deg, #60a5fa, #93c5fd); }
+.skill-freq-cat-file-write { background: linear-gradient(90deg, #f97316, #fdba74); }
+.skill-freq-cat-search { background: linear-gradient(90deg, #a78bfa, #c4b5fd); }
+.skill-freq-cat-terminal { background: linear-gradient(90deg, #22d3ee, #67e8f9); }
+.skill-freq-cat-browser { background: linear-gradient(90deg, #34d399, #6ee7b7); }
+.skill-freq-cat-git { background: linear-gradient(90deg, #fb923c, #fdba74); }
+.skill-freq-cat-analysis { background: linear-gradient(90deg, #f472b6, #f9a8d4); }
+.skill-freq-cat-other { background: linear-gradient(90deg, #94a3b8, #cbd5e1); }
+
+.skill-freq-count {
+  min-width: 2rem;
+  text-align: right;
+  font-weight: 600;
+  color: #475569;
+  font-size: 0.75rem;
+}
+
+.skill-unused-section {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid #e5e7eb;
+}
 
 /* History messages in section */
 .history-messages {

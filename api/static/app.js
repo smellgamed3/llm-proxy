@@ -616,6 +616,176 @@ function formatBytes(bytes) {
   return (bytes / 1048576).toFixed(2) + ' MB';
 }
 
+function formatBytes(bytes) {
+  if (bytes == null) return '—';
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / 1048576).toFixed(2) + ' MB';
+}
+
+/* ── Skill / Tool Usage Analysis ────────────────────────────────── */
+
+const SKILL_CATEGORIES = [
+  { key: 'file-read',  label: '文件读取',  icon: '📖', patterns: [/read_file|cat|head|tail|view_image|view_file|get_file|file_read/i] },
+  { key: 'file-write', label: '文件写入',  icon: '✏️', patterns: [/write|create_file|edit|replace|patch|insert|update_file|save/i] },
+  { key: 'search',     label: '搜索',      icon: '🔍', patterns: [/search|grep|find|glob|ripgrep|rg|locate|semantic_search/i] },
+  { key: 'terminal',   label: '终端命令',  icon: '💻', patterns: [/terminal|exec|run|shell|bash|command|subprocess|spawn/i] },
+  { key: 'browser',    label: '浏览器',    icon: '🌐', patterns: [/browser|fetch|url|http|web|page|navigate|screenshot/i] },
+  { key: 'git',        label: 'Git',       icon: '🔀', patterns: [/git|commit|branch|merge|diff|pull|push|checkout/i] },
+  { key: 'analysis',   label: '分析',      icon: '🧠', patterns: [/analy|lint|diagnos|error|test|check|validat/i] },
+  { key: 'other',      label: '其他',      icon: '⚡', patterns: [] },
+];
+
+function categorizeToolName(name) {
+  const n = String(name || '');
+  for (const cat of SKILL_CATEGORIES) {
+    if (cat.key === 'other') continue;
+    if (cat.patterns.some(p => p.test(n))) return cat.key;
+  }
+  return 'other';
+}
+
+function analyzeSkillUsage(toolDefs, messages) {
+  const definedTools = (toolDefs || []).map(t => t.name || '');
+  const callMap = {};
+  const callOrder = [];
+
+  (messages || []).forEach(msg => {
+    if (msg.role === 'assistant' && Array.isArray(msg.tool_calls)) {
+      msg.tool_calls.forEach(tc => {
+        const name = tc?.function?.name || tc?.name || 'unknown';
+        callMap[name] = (callMap[name] || 0) + 1;
+        callOrder.push(name);
+      });
+    }
+  });
+
+  const totalCalls = callOrder.length;
+  const uniqueCalled = Object.keys(callMap);
+  const totalDefined = definedTools.length;
+
+  // Categorize defined tools
+  const categoryDefined = {};
+  const categoryUsed = {};
+  definedTools.forEach(name => {
+    const cat = categorizeToolName(name);
+    if (!categoryDefined[cat]) categoryDefined[cat] = [];
+    categoryDefined[cat].push(name);
+  });
+
+  // Categorize called tools
+  uniqueCalled.forEach(name => {
+    const cat = categorizeToolName(name);
+    if (!categoryUsed[cat]) categoryUsed[cat] = [];
+    categoryUsed[cat].push({ name, count: callMap[name] });
+  });
+
+  // Sort calls by frequency
+  const topCalls = Object.entries(callMap)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 15);
+
+  // Unused tools
+  const calledSet = new Set(uniqueCalled);
+  const unused = definedTools.filter(n => !calledSet.has(n));
+
+  return {
+    totalDefined,
+    totalCalls,
+    uniqueCalled: uniqueCalled.length,
+    unusedCount: unused.length,
+    unused,
+    callMap,
+    topCalls,
+    categoryDefined,
+    categoryUsed,
+    callOrder,
+  };
+}
+
+function renderSkillStats(stats) {
+  let html = '';
+
+  // Summary cards row
+  html += `<div class="skill-stats-cards">
+    <div class="skill-stat-card">
+      <div class="skill-stat-value">${stats.totalDefined}</div>
+      <div class="skill-stat-label">定义工具</div>
+    </div>
+    <div class="skill-stat-card">
+      <div class="skill-stat-value">${stats.uniqueCalled}</div>
+      <div class="skill-stat-label">实际使用</div>
+    </div>
+    <div class="skill-stat-card">
+      <div class="skill-stat-value">${stats.totalCalls}</div>
+      <div class="skill-stat-label">调用次数</div>
+    </div>
+    <div class="skill-stat-card">
+      <div class="skill-stat-value">${stats.totalDefined > 0 ? ((stats.uniqueCalled / stats.totalDefined) * 100).toFixed(0) + '%' : '—'}</div>
+      <div class="skill-stat-label">使用率</div>
+    </div>
+  </div>`;
+
+  // Category distribution
+  const allCatKeys = new Set([...Object.keys(stats.categoryDefined), ...Object.keys(stats.categoryUsed)]);
+  if (allCatKeys.size > 0) {
+    html += `<div class="skill-category-section">
+      <div class="skill-section-title">能力分布</div>
+      <div class="skill-category-grid">`;
+    SKILL_CATEGORIES.forEach(cat => {
+      const defined = stats.categoryDefined[cat.key] || [];
+      const used = stats.categoryUsed[cat.key] || [];
+      if (defined.length === 0 && used.length === 0) return;
+      const usedCount = used.reduce((s, u) => s + u.count, 0);
+      html += `<div class="skill-category-card">
+        <div class="skill-cat-header">
+          <span class="skill-cat-icon">${cat.icon}</span>
+          <span class="skill-cat-name">${cat.label}</span>
+        </div>
+        <div class="skill-cat-metrics">
+          <span class="skill-cat-metric">${defined.length} 定义</span>
+          <span class="skill-cat-divider">·</span>
+          <span class="skill-cat-metric">${used.length} 使用</span>
+          ${usedCount > 0 ? `<span class="skill-cat-divider">·</span><span class="skill-cat-metric">${usedCount} 次调用</span>` : ''}
+        </div>
+        ${used.length > 0 ? `<div class="skill-cat-tools">${used.map(u => `<span class="skill-tool-badge skill-tool-used">${escapeHtml(u.name)}${u.count > 1 ? ` ×${u.count}` : ''}</span>`).join('')}</div>` : ''}
+      </div>`;
+    });
+    html += `</div></div>`;
+  }
+
+  // Top called tools chart
+  if (stats.topCalls.length > 0) {
+    const maxCount = stats.topCalls[0][1];
+    html += `<div class="skill-section-title">调用频率 Top${Math.min(stats.topCalls.length, 15)}</div>`;
+    html += `<div class="skill-freq-list">`;
+    stats.topCalls.forEach(([name, count]) => {
+      const pct = (count / maxCount) * 100;
+      const cat = categorizeToolName(name);
+      const catInfo = SKILL_CATEGORIES.find(c => c.key === cat) || SKILL_CATEGORIES[SKILL_CATEGORIES.length - 1];
+      html += `<div class="skill-freq-row">
+        <span class="skill-freq-icon">${catInfo.icon}</span>
+        <span class="skill-freq-name">${escapeHtml(name)}</span>
+        <div class="skill-freq-bar-bg"><div class="skill-freq-bar skill-freq-cat-${cat}" style="width:${pct}%"></div></div>
+        <span class="skill-freq-count">${count}</span>
+      </div>`;
+    });
+    html += `</div>`;
+  }
+
+  // Unused tools (collapsed if many)
+  if (stats.unused.length > 0) {
+    const showMax = 10;
+    const displayed = stats.unused.slice(0, showMax);
+    html += `<div class="skill-unused-section">
+      <div class="skill-section-title">未使用工具 (${stats.unused.length})</div>
+      <div class="skill-cat-tools">${displayed.map(n => `<span class="skill-tool-badge skill-tool-unused">${escapeHtml(n)}</span>`).join('')}${stats.unused.length > showMax ? `<span class="skill-tool-badge skill-tool-unused">…+${stats.unused.length - showMax}</span>` : ''}</div>
+    </div>`;
+  }
+
+  return html;
+}
+
 function toggleToolParams(cardId, event) {
   if (event) event.stopPropagation();
   const panel = document.getElementById(cardId);
@@ -912,7 +1082,23 @@ function buildCollapsibleSections(ctx) {
     }));
   }
 
-  // 3. History section (all messages except last user & system)
+  // 3. Skill Statistics section — analyze tool call patterns
+  if (Array.isArray(reqMessages)) {
+    const skillStats = analyzeSkillUsage(toolDefsArr, reqMessages);
+    if (skillStats.totalDefined > 0 || skillStats.totalCalls > 0) {
+      sections.push(buildSection({
+        id: 'section-skills',
+        icon: '📊',
+        iconClass: 'section-icon-skills',
+        title: 'Skill 统计',
+        badge: `${skillStats.totalCalls} calls / ${skillStats.totalDefined} defined`,
+        contentHTML: renderSkillStats(skillStats),
+        defaultOpen: false,
+      }));
+    }
+  }
+
+  // 4. History section (all messages except last user & system)
   if (Array.isArray(reqMessages) && reqMessages.length > 0) {
     const { historyMessages, lastUserMessage } = categorizeMessages(reqMessages);
     if (historyMessages.length > 0) {
@@ -941,7 +1127,7 @@ function buildCollapsibleSections(ctx) {
     }
   }
 
-  // 4. User Prompt section
+  // 5. User Prompt section
   if (resolvedUserPrompt) {
     sections.push(buildSection({
       id: 'section-user',
@@ -955,7 +1141,7 @@ function buildCollapsibleSections(ctx) {
     }));
   }
 
-  // 5. Assistant Response section
+  // 6. Assistant Response section
   if (resolvedAssistant) {
     sections.push(buildSection({
       id: 'section-assistant',
@@ -969,7 +1155,7 @@ function buildCollapsibleSections(ctx) {
     }));
   }
 
-  // 6. Optimization Hints section
+  // 7. Optimization Hints section
   const hints = promptOptimizationHints({
     ...detail,
     system_prompt: resolvedSystemPrompt,
