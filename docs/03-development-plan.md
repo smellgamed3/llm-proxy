@@ -19,6 +19,7 @@ Phase 0 ──→ Phase 1 ──→ Phase 2 ──→ Phase 3 ──→ Phase 4
 | P4 | 扩展 & 加固 | 更多 extractor，WS 分析，备份，性能优化 | P3 |
 
 > P1 和 P2 可并行开发（P2 可基于手工构造的测试数据开发）。
+> 当前 `0.2.x` 基线已完成 P0-P3 主链路；P4 项目继续作为后续增强迭代。
 
 ---
 
@@ -31,7 +32,7 @@ Phase 0 ──→ Phase 1 ──→ Phase 2 ──→ Phase 3 ──→ Phase 4
 | 0.1 | 创建 `analyzer/` 和 `api/` 包目录结构 | 空包骨架 |
 | 0.2 | 更新 `pyproject.toml` 添加新依赖（fastapi, chart.js CDN） | pyproject.toml |
 | 0.3 | 创建 `pricing.yaml` 模板 | pricing.yaml |
-| 0.4 | 编写 DB schema migration 脚本 | scripts/migrate.py |
+| 0.4 | 规划 DB migration 策略 | 文档化迁移步骤 / 后续脚本 |
 | 0.5 | 新增 `Dockerfile.analyzer` 和 `Dockerfile.api` | Dockerfile.* |
 | 0.6 | 更新 `docker-compose.yml` 三服务编排 | docker-compose.yml |
 
@@ -39,7 +40,7 @@ Phase 0 ──→ Phase 1 ──→ Phase 2 ──→ Phase 3 ──→ Phase 4
 
 - [ ] `uv sync` 成功安装所有依赖
 - [ ] 三个服务（proxy, analyzer, api）可独立启动不报错
-- [ ] Migration 脚本可对空库或现有 proxy.db 执行升级
+- [ ] 现有数据迁移路径清晰，可通过文档化步骤或后续脚本执行升级
 
 ---
 
@@ -57,7 +58,7 @@ Phase 0 ──→ Phase 1 ──→ Phase 2 ──→ Phase 3 ──→ Phase 4
 | 1.6 | JSONL 按小时分片 | `app/recorder.py` | 新增文件轮转逻辑 |
 | 1.7 | Manifest 索引写入 | `app/recorder.py` | 每次写 body 追加 manifest |
 | 1.8 | 移除 recorder 中的 model 提取 | `app/recorder.py` | 录制层不再做 JSON 解析 |
-| 1.9 | 兼容性：旧 proxy.db 数据迁移 | `scripts/migrate.py` | 可选，手动执行 |
+| 1.9 | 兼容性：旧 proxy.db 数据迁移 | 文档化步骤 / 后续脚本 | 可选，手动执行 |
 
 ### 3.2 测试计划
 

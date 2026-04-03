@@ -44,6 +44,18 @@ def jsonl_bodies(recorder: Recorder) -> list[dict]:
     return results
 
 
+def jsonl_manifest(recorder: Recorder) -> list[dict]:
+    """Parse manifest entries for body shard lookups."""
+    manifest_path = recorder.bodies_dir / "manifest.jsonl"
+    if not manifest_path.exists():
+        return []
+    return [
+        json.loads(line)
+        for line in manifest_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
 # ── fixtures ─────────────────────────────────────────────────────────────────
 
 @pytest.fixture

@@ -80,6 +80,7 @@ function renderTrendChart(daily) {
 // ── Conversations page ────────────────────────────────────────────────────
 
 let currentPage = 1;
+let selectedConversationId = null;
 
 async function loadConversations(page) {
   currentPage = page || 1;
@@ -96,7 +97,7 @@ async function loadConversations(page) {
     const tbody = document.getElementById('conv-tbody');
     if (!tbody) return;
     tbody.innerHTML = data.items.map(r => `
-      <tr>
+      <tr class="conversation-row${selectedConversationId === r.id ? ' selected' : ''}" data-conversation-id="${r.id}">
         <td>${r.timestamp ? r.timestamp.replace('T', ' ').slice(0, 19) : '—'}</td>
         <td>${r.model || '—'}</td>
         <td><span class="badge badge-${r.status === 'success' ? 'success' : 'error'}">${r.status}</span></td>
@@ -105,10 +106,47 @@ async function loadConversations(page) {
         <td>${fmt(r.duration_ms, 1)}</td>
       </tr>
     `).join('');
+    tbody.querySelectorAll('.conversation-row').forEach((row) => {
+      row.addEventListener('click', () => showConversationDetail(row.dataset.conversationId));
+    });
     renderPagination(data.total, data.page, data.page_size);
   } catch (e) {
     console.error('Conversations load error:', e);
   }
+}
+
+async function showConversationDetail(conversationId) {
+  selectedConversationId = conversationId;
+  try {
+    const [detail, raw] = await Promise.all([
+      fetchJSON(`${API}/conversations/${conversationId}`),
+      fetchJSON(`${API}/conversations/${conversationId}/raw`),
+    ]);
+
+    document.getElementById('conversation-detail').hidden = false;
+    document.getElementById('detail-meta').innerHTML = `
+      <span><strong>ID:</strong> ${detail.id}</span>
+      <span><strong>Model:</strong> ${detail.model || '—'}</span>
+      <span><strong>Status:</strong> ${detail.status || '—'}</span>
+      <span><strong>Latency:</strong> ${fmt(detail.duration_ms, 1)} ms</span>
+    `;
+    document.getElementById('detail-system-prompt').textContent = detail.system_prompt || '—';
+    document.getElementById('detail-user-prompt').textContent = detail.user_prompt || '—';
+    document.getElementById('detail-assistant-response').textContent = detail.assistant_response || '—';
+    document.getElementById('detail-request-body').textContent = raw.request_body || '—';
+    document.getElementById('detail-response-body').textContent = raw.response_body || '—';
+    document.querySelectorAll('.conversation-row').forEach((row) => {
+      row.classList.toggle('selected', row.dataset.conversationId === conversationId);
+    });
+  } catch (e) {
+    console.error('Conversation detail load error:', e);
+  }
+}
+
+function hideConversationDetail() {
+  selectedConversationId = null;
+  document.getElementById('conversation-detail').hidden = true;
+  document.querySelectorAll('.conversation-row').forEach((row) => row.classList.remove('selected'));
 }
 
 function renderPagination(total, page, pageSize) {

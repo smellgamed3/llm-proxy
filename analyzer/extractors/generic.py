@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .base import BaseExtractor, ExtractionResult
+from .base import BaseExtractor, ExtractionResult, classify_status
 
 
 class GenericExtractor(BaseExtractor):
@@ -17,13 +17,9 @@ class GenericExtractor(BaseExtractor):
     ) -> ExtractionResult:
         result = ExtractionResult()
         status_code = raw_record.get("status_code")
-        if status_code is not None:
-            if status_code >= 500:
-                result.status = "error"
-                result.error_type = f"http_{status_code}"
-            elif status_code >= 400:
-                result.status = "client_error"
-                result.error_type = f"http_{status_code}"
-            else:
-                result.status = "success"
+        error_message = raw_record.get("error")
+        if status_code is not None and status_code >= 400:
+            result.error_type = f"http_{status_code}"
+        result.error_message = error_message
+        result.status = classify_status(status_code, result.error_type, error_message)
         return result

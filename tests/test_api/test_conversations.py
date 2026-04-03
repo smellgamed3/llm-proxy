@@ -4,6 +4,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
+import json
 
 import pytest
 from fastapi.testclient import TestClient
@@ -29,6 +30,8 @@ def raw_db_path(tmp_path: Path) -> str:
             timestamp TEXT,
             method TEXT,
             path TEXT,
+            request_body_ref TEXT,
+            response_body_ref TEXT,
             status_code INTEGER,
             duration_ms REAL
         );
@@ -151,3 +154,45 @@ class TestGetConversation:
     def test_get_raw_nonexistent_returns_404(self, client: TestClient):
         r = client.get("/api/conversations/nonexistent/raw")
         assert r.status_code == 404
+
+    def test_get_raw_returns_rehydrated_bodies(
+        self,
+        client: TestClient,
+        raw_db_path: str,
+        tmp_path: Path,
+    ):
+        bodies_dir = tmp_path / "bodies"
+        bodies_dir.mkdir(parents=True, exist_ok=True)
+        shard_path = bodies_dir / "2024-01-01-00.jsonl"
+        request_ref = "conv-raw:request"
+        response_ref = "conv-raw:response"
+
+        request_line = json.dumps({"ref": request_ref, "timestamp": "2024-01-01T00:00:00Z", "data": "request body"}) + "\n"
+        response_line = json.dumps({"ref": response_ref, "timestamp": "2024-01-01T00:00:01Z", "data": "response body"}) + "\n"
+        with open(shard_path, "wb") as handle:
+            handle.write(request_line.encode("utf-8"))
+            request_offset = 0
+            response_offset = handle.tell()
+            handle.write(response_line.encode("utf-8"))
+
+        manifest_path = bodies_dir / "manifest.jsonl"
+        manifest_path.write_text(
+            json.dumps({"ref": request_ref, "file": shard_path.name, "offset": request_offset, "length": len(request_line.encode("utf-8"))}) + "\n"
+            + json.dumps({"ref": response_ref, "file": shard_path.name, "offset": response_offset, "length": len(response_line.encode("utf-8"))}) + "\n",
+            encoding="utf-8",
+        )
+
+        conn = sqlite3.connect(raw_db_path)
+        conn.execute(
+            """INSERT INTO raw_requests (id, seq, timestamp, method, path, request_body_ref, response_body_ref, status_code, duration_ms)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ("conv-raw", 1, "2024-01-01T00:00:00Z", "POST", "/v1/chat/completions", request_ref, response_ref, 200, 12.0),
+        )
+        conn.commit()
+        conn.close()
+
+        response = client.get("/api/conversations/conv-raw/raw")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["request_body"] == "request body"
+        assert data["response_body"] == "response body"

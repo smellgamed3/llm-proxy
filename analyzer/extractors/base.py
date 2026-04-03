@@ -1,6 +1,6 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass
@@ -23,6 +23,23 @@ class ExtractionResult:
     status: str = "success"
     error_type: str | None = None
     error_message: str | None = None
+
+
+def classify_status(
+    status_code: int | None,
+    error_type: str | None = None,
+    error_message: str | None = None,
+    default: str = "error",
+) -> str:
+    """Normalize provider/http failures into documented status buckets."""
+    text = " ".join(part for part in (error_type, error_message) if part).lower()
+    if status_code in {408, 504} or "timeout" in text or "timed out" in text:
+        return "timeout"
+    if status_code == 429 or "rate_limit" in text or "rate limit" in text:
+        return "rate_limited"
+    if status_code is not None and status_code < 400:
+        return "success"
+    return default
 
 
 class BaseExtractor(ABC):

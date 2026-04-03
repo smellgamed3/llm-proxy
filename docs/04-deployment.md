@@ -264,7 +264,7 @@ resp = api.get("/api/conversations", params={"model": "gpt-4o", "page_size": 10}
 conversations = resp.json()
 
 # 查询成本
-resp = api.get("/api/costs", params={"group_by": "model", "date_from": "2026-04-01"})
+resp = api.get("/api/costs/by-model", params={"date_from": "2026-04-01"})
 costs = resp.json()
 ```
 

@@ -134,6 +134,14 @@ h2 {
   background: #f5f7fa;
 }
 
+.conversation-row {
+  cursor: pointer;
+}
+
+.conversation-row.selected {
+  background: #e8f1fb;
+}
+
 .filters {
   display: flex;
   gap: 0.75rem;
@@ -206,3 +214,60 @@ h2 {
 .badge-success { background: #d4edda; color: #155724; }
 .badge-error { background: #f8d7da; color: #721c24; }
 .badge-warning { background: #fff3cd; color: #856404; }
+
+.detail-panel {
+  background: #fff;
+  border-radius: 8px;
+  padding: 1.5rem;
+  margin-top: 1.5rem;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
+
+.detail-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+
+.detail-close {
+  padding: 0.5rem 0.8rem;
+  border: 1px solid #d0d7e2;
+  border-radius: 4px;
+  background: #fff;
+  cursor: pointer;
+}
+
+.detail-meta {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+  color: #4b5563;
+  font-size: 0.9rem;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1rem;
+}
+
+.detail-grid h3 {
+  font-size: 0.95rem;
+  margin-bottom: 0.5rem;
+}
+
+.detail-grid pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #f8f9fb;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  padding: 0.9rem;
+  min-height: 8rem;
+  max-height: 22rem;
+  overflow: auto;
+  font-size: 0.85rem;
+  color: #1f2937;
+}

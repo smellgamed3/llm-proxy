@@ -6,6 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from analyzer.body_reader import BodyReader
 from api.dependencies import get_analytics_db, get_raw_db, get_bodies_dir
 
 router = APIRouter(tags=["conversations"])
@@ -106,6 +107,7 @@ def get_conversation(
 def get_raw_conversation(
     conv_id: str,
     raw_db: sqlite3.Connection = Depends(get_raw_db),
+    bodies_dir: str = Depends(get_bodies_dir),
 ) -> dict:
     """Get raw request/response data from raw.db."""
     row = raw_db.execute(
@@ -113,4 +115,10 @@ def get_raw_conversation(
     ).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="Raw record not found")
-    return dict(row)
+    data = dict(row)
+    body_reader = BodyReader(bodies_dir)
+    if data.get("request_body_ref"):
+        data["request_body"] = body_reader.read(data["request_body_ref"])
+    if data.get("response_body_ref"):
+        data["response_body"] = body_reader.read(data["response_body_ref"])
+    return data

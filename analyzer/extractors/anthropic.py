@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 
-from .base import BaseExtractor, ExtractionResult
+from .base import BaseExtractor, ExtractionResult, classify_status
 
 logger = logging.getLogger("analyzer.extractors.anthropic")
 
@@ -51,7 +51,6 @@ class AnthropicExtractor(BaseExtractor):
 
         status_code = raw_record.get("status_code")
         if status_code and status_code >= 400:
-            result.status = "error"
             if response_body:
                 try:
                     err_data = json.loads(response_body)
@@ -59,6 +58,7 @@ class AnthropicExtractor(BaseExtractor):
                     result.error_message = err_data.get("error", {}).get("message")
                 except json.JSONDecodeError:
                     result.error_message = response_body[:500]
+            result.status = classify_status(status_code, result.error_type, result.error_message)
             return result
 
         result.status = "success"

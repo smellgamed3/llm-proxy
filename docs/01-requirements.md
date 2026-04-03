@@ -20,6 +20,9 @@
 3. **查询服务**：RESTful API 供内外部系统检索分析数据
 4. **管理界面**：Dashboard 供人工管理调试
 
+> 当前 `0.2.x` 版本交付范围聚焦 P0-P3 主链路：录制增强、HTTP/Anthropic 分析、查询 API、静态 Dashboard。
+> WebSocket Realtime 语义解析与自动备份属于后续扩展项，保留在后续阶段继续交付。
+
 ## 3. 功能需求
 
 ### 3.1 录制层增强（FR-REC）

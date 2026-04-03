@@ -86,9 +86,18 @@ class TestChatCompletion:
             {"path": "/v1/chat/completions", "status_code": 429, "is_stream": 0},
             req, resp,
         )
-        assert result.status == "error"
+        assert result.status == "rate_limited"
         assert result.error_type == "rate_limit_exceeded"
         assert "Too many requests" in (result.error_message or "")
+
+    def test_timeout_response_classified(self, extractor):
+        req = json.dumps({"model": "gpt-4o", "messages": []})
+        resp = json.dumps({"error": {"type": "request_timeout", "message": "Request timed out"}})
+        result = extractor.extract(
+            {"path": "/v1/chat/completions", "status_code": 504, "is_stream": 0},
+            req, resp,
+        )
+        assert result.status == "timeout"
 
 
 class TestStreamingResponse:

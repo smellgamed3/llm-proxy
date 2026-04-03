@@ -5,12 +5,13 @@ import json
 import sqlite3
 import threading
 from pathlib import Path
+from unittest.mock import ANY
 
 import pytest
 
 from app.config import Config
 from app.recorder import Recorder, SeqGenerator
-from tests.conftest import db_rows, jsonl_bodies
+from tests.conftest import db_rows, jsonl_bodies, jsonl_manifest
 
 
 @pytest.fixture
@@ -149,14 +150,23 @@ class TestRecordRequest:
     def test_manifest_written(self, rec: Recorder):
         rid = rec.new_request_id()
         rec.record_request(rid, "POST", "/v1/chat", "", {}, b'hello')
-        manifest = rec.bodies_dir / "manifest.jsonl"
-        assert manifest.exists()
-        entries = [json.loads(l) for l in manifest.read_text().splitlines() if l.strip()]
+        entries = jsonl_manifest(rec)
         assert len(entries) == 1
         assert entries[0]["ref"].startswith(rid)
         assert "file" in entries[0]
         assert "offset" in entries[0]
         assert "length" in entries[0]
+
+    def test_jsonl_writes_fsync_data_and_manifest(self, rec: Recorder, monkeypatch: pytest.MonkeyPatch):
+        fsync_calls: list[int] = []
+
+        def fake_fsync(fd: int) -> None:
+            fsync_calls.append(fd)
+
+        monkeypatch.setattr("app.recorder.os.fsync", fake_fsync)
+        rid = rec.new_request_id()
+        rec.record_request(rid, "POST", "/v1/chat", "", {}, b"hello")
+        assert len(fsync_calls) >= 2
 
 
 class TestRecordResponse:

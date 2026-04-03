@@ -16,7 +16,7 @@ def get_latency_summary(
     date_to: str | None = None,
     db: sqlite3.Connection = Depends(get_analytics_db),
 ) -> dict:
-    """Return latency percentiles (p50, p90, p99)."""
+    """Return latency percentiles (p50, p95, p99)."""
     where = []
     params = []
     if model:
@@ -28,18 +28,18 @@ def get_latency_summary(
     if date_to:
         where.append("timestamp <= ?")
         params.append(date_to + "T23:59:59")
+    where.append("duration_ms IS NOT NULL")
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
 
     rows = db.execute(
         f"""SELECT duration_ms FROM conversations {where_sql}
-            AND duration_ms IS NOT NULL
             ORDER BY duration_ms ASC""",
         params,
     ).fetchall()
 
     values = [r["duration_ms"] for r in rows]
     if not values:
-        return {"p50": None, "p90": None, "p99": None, "count": 0}
+        return {"p50": None, "p95": None, "p99": None, "count": 0, "avg": None}
 
     def percentile(lst: list[float], p: float) -> float:
         idx = int(len(lst) * p / 100)
@@ -47,7 +47,7 @@ def get_latency_summary(
 
     return {
         "p50": round(percentile(values, 50), 2),
-        "p90": round(percentile(values, 90), 2),
+        "p95": round(percentile(values, 95), 2),
         "p99": round(percentile(values, 99), 2),
         "count": len(values),
         "avg": round(sum(values) / len(values), 2),

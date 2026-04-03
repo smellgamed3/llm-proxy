@@ -318,7 +318,7 @@ class AnalyzerWorker:
             result = self.extractors[-1].extract(record, req_body, resp_body)  # generic
 
         # 计算成本
-        result.estimated_cost_usd = self.cost_calculator.calculate(
+        result.cost_usd = self.cost_calculator.calculate(
             result.model, result.prompt_tokens, result.completion_tokens
         )
 
@@ -420,7 +420,7 @@ CREATE TABLE conversations (
     prompt_tokens       INTEGER,
     completion_tokens   INTEGER,
     total_tokens        INTEGER,
-    estimated_cost_usd  REAL,
+    cost_usd            REAL,
 
     -- 延迟
     duration_ms         REAL,
@@ -520,12 +520,12 @@ api/
 │   ├── __init__.py
 │   ├── overview.py          ← GET /api/overview
 │   ├── conversations.py     ← GET/POST /api/conversations
-│   ├── costs.py             ← GET /api/costs
-│   ├── latency.py           ← GET /api/latency
+│   ├── costs.py             ← GET /api/costs/*
+│   ├── latency.py           ← GET /api/latency/*
 │   ├── prompts.py           ← GET /api/prompts/*
 │   ├── models.py            ← GET /api/models/*
-│   ├── errors.py            ← GET /api/errors
-│   └── admin.py             ← POST /api/analyzer/*
+│   ├── errors.py            ← GET /api/errors/*
+│   └── admin.py             ← POST /api/admin/analyzer/*
 └── static/                  ← Dashboard 前端静态文件
     ├── index.html
     ├── app.js
@@ -565,18 +565,21 @@ GET /api/conversations/:id/raw
 **成本分析**
 
 ```
-GET /api/costs
-  ?group_by=model|provider|date|hour
-  &date_from=&date_to=
-  → { items: [{ group_key, total_cost, total_tokens, request_count }] }
+GET /api/costs/summary
+  ?date_from=&date_to=
+  → { total_cost_usd, total_tokens, total_requests }
+
+GET /api/costs/by-model
+  ?date_from=&date_to=
+  → [{ model, cost_usd, total_tokens, request_count }]
 ```
 
 **延迟分析**
 
 ```
-GET /api/latency
+GET /api/latency/summary
   ?model=&date_from=&date_to=
-  → { avg, p50, p95, p99, max, histogram: [...] }
+  → { avg, p50, p95, p99, count }
 ```
 
 **提示词**
@@ -593,17 +596,21 @@ GET /api/prompts/templates/:id
 **模型统计**
 
 ```
-GET /api/models/stats
+GET /api/models/usage
   ?date_from=&date_to=
-  → { items: [{ model, request_count, token_count, cost_usd, avg_duration }] }
+  → [{ model, request_count, total_tokens, cost_usd, avg_duration_ms }]
 ```
 
 **错误**
 
 ```
-GET /api/errors
-  ?date_from=&date_to=&error_type=
-  → { items: [...], by_type: { timeout: N, rate_limited: N, ... } }
+GET /api/errors/summary
+  ?date_from=&date_to=
+  → { total_requests, error_count, error_rate, top_error_types }
+
+GET /api/errors/recent
+  ?limit=50
+  → [{ id, timestamp, model, error_type, error_message, ... }]
 ```
 
 **管理**
@@ -611,10 +618,10 @@ GET /api/errors
 ```
 POST /api/admin/analyzer/rerun
   body: { mode: "full" | "incremental" | "range", since?: "...", until?: "..." }
-  → { status: "started", message: "..." }
+  → { status: "completed", mode, processed, last_seq, since, until }
 
 GET /api/admin/analyzer/status
-  → { mode, last_seq, last_run_at, records_processed }
+  → { watermark_seq, records_processed, conversation_count, template_count }
 ```
 
 #### 2.4.3 Dashboard

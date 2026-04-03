@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 import sqlite3
 import threading
 import uuid
@@ -145,13 +146,15 @@ class Recorder:
         """Write a body to the hourly JSONL shard. Returns (ref, data_size)."""
         ref = f"{record_id}:{direction}"
         body_str = data if isinstance(data, str) else ""
+        original_size = 0
         if isinstance(data, bytes):
+            original_size = len(data)
             try:
                 body_str = data.decode("utf-8")
             except UnicodeDecodeError:
                 body_str = f"<binary {len(data)} bytes>"
-
-        original_size = len(body_str.encode("utf-8"))
+        elif isinstance(data, str):
+            original_size = len(data.encode("utf-8"))
 
         # Truncate if too large
         if len(body_str) > self.config.max_body_log_size:
@@ -170,6 +173,8 @@ class Recorder:
             offset = jsonl_path.stat().st_size if jsonl_path.exists() else 0
             with open(jsonl_path, "ab") as f:
                 f.write(line_bytes)
+                f.flush()
+                os.fsync(f.fileno())
 
             # Update manifest
             manifest_path = self.bodies_dir / "manifest.jsonl"
@@ -181,6 +186,8 @@ class Recorder:
             }, ensure_ascii=False)
             with open(manifest_path, "a", encoding="utf-8") as mf:
                 mf.write(manifest_entry + "\n")
+                mf.flush()
+                os.fsync(mf.fileno())
 
         return ref, original_size
 

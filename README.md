@@ -177,7 +177,7 @@ docker compose exec llm-proxy sqlite3 /data/logs/raw.db \
 
 # 查询分析数据
 docker compose exec api sqlite3 /data/analytics/analytics.db \
-  "SELECT model, COUNT(*) as cnt, SUM(estimated_cost_usd) as cost,
+  "SELECT model, COUNT(*) as cnt, SUM(cost_usd) as cost,
           AVG(duration_ms) as avg_ms
    FROM conversations GROUP BY model;"
 ```
@@ -208,11 +208,15 @@ RESTful JSON API，供 Dashboard 和业务系统使用：
 | `GET /api/conversations` | 对话列表（支持 model/status/date/关键词过滤和分页） |
 | `GET /api/conversations/:id` | 对话详情（含完整 prompt + response） |
 | `GET /api/conversations/:id/raw` | 回溯原始请求/响应 body |
-| `GET /api/costs` | 成本分析（按模型/日期/provider 汇总） |
-| `GET /api/latency` | 延迟分析（P50/P95/P99） |
+| `GET /api/costs/summary` | 成本总览 |
+| `GET /api/costs/by-model` | 按模型汇总成本和 token |
+| `GET /api/costs/daily` | 每日成本趋势 |
+| `GET /api/latency/summary` | 延迟分析（P50/P95/P99） |
 | `GET /api/prompts/templates` | 提示词模板列表 |
-| `GET /api/models/stats` | 按模型维度统计 |
-| `GET /api/errors` | 错误列表 |
+| `GET /api/models/usage` | 按模型维度统计 |
+| `GET /api/errors/summary` | 错误概览 |
+| `GET /api/errors/recent` | 最近错误列表 |
+| `POST /api/admin/analyzer/rerun` | 触发一次重分析/补跑 |
 
 完整 API 文档：`http://localhost:9091/docs`
 
@@ -245,7 +249,7 @@ curl http://localhost:9090/health
 
 # 分析 Worker 状态
 curl http://localhost:9091/api/admin/analyzer/status
-# → {"mode": "incremental", "last_seq": 12345, ...}
+# → {"watermark_seq": 12345, "records_processed": 12345, ...}
 ```
 
 ## 文档

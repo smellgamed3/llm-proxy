@@ -37,6 +37,15 @@ class AnalyzerWorker:
         ]
 
     def run(self) -> None:
+        if self.config.mode == "incremental":
+            start_seq = self.analytics_store.get_watermark()
+            logger.info("Incremental mode: resuming from seq %d", start_seq)
+            self._process_loop(start_seq)
+            return
+
+        self.run_once()
+
+    def run_once(self) -> dict[str, int]:
         if self.config.mode == "full":
             logger.info("Full mode: resetting analytics store")
             self.analytics_store.reset()
@@ -46,55 +55,68 @@ class AnalyzerWorker:
             logger.info("Range mode: starting from seq %d", start_seq)
         else:
             start_seq = self.analytics_store.get_watermark()
-            logger.info("Incremental mode: resuming from seq %d", start_seq)
+            logger.info("Run-once incremental catch-up from seq %d", start_seq)
 
-        self._process_loop(start_seq)
+        return self._process_available(start_seq)
 
     def _process_loop(self, start_seq: int) -> None:
         seq = start_seq
         while True:
             batch = self._fetch_batch(seq)
             if not batch:
-                if self.config.mode != "incremental":
-                    logger.info("No more records to process. Exiting.")
-                    break
                 time.sleep(self.config.interval)
                 continue
 
-            dates_to_refresh: set[str] = set()
-            for record in batch:
-                try:
-                    self._process_record(record, dates_to_refresh)
-                    seq = record["seq"]
-                except Exception as e:
-                    logger.error("Error processing record %s: %s", record.get("id"), e, exc_info=True)
-                    seq = record["seq"]
+            seq, processed = self._process_batch(batch, seq)
+            logger.debug("Processed batch of %d records, watermark now %d", processed, seq)
 
-            self.analytics_store.set_watermark(seq, len(batch))
-            logger.debug("Processed batch of %d records, watermark now %d", len(batch), seq)
+    def _process_available(self, start_seq: int) -> dict[str, int]:
+        seq = start_seq
+        processed_total = 0
+        while True:
+            batch = self._fetch_batch(seq, until=self.config.until if self.config.mode == "range" else None)
+            if not batch:
+                logger.info("No more records to process. Exiting.")
+                return {"processed": processed_total, "last_seq": seq}
 
-            # Refresh daily stats for affected dates
-            for date in dates_to_refresh:
-                try:
-                    self.analytics_store.refresh_daily_stats(date)
-                except Exception as e:
-                    logger.warning("Failed to refresh daily stats for %s: %s", date, e)
+            seq, processed = self._process_batch(batch, seq)
+            processed_total += processed
 
-            # Stop if range mode reached until boundary
-            if self.config.mode == "range" and self.config.until:
-                last_ts = batch[-1].get("timestamp", "")
-                if last_ts and last_ts[:10] > self.config.until[:10]:
-                    logger.info("Range mode: reached until boundary %s", self.config.until)
-                    break
+    def _process_batch(self, batch: list[dict], current_seq: int) -> tuple[int, int]:
+        seq = current_seq
+        dates_to_refresh: set[str] = set()
+        for record in batch:
+            try:
+                self._process_record(record, dates_to_refresh)
+                seq = record["seq"]
+            except Exception as e:
+                logger.error("Error processing record %s: %s", record.get("id"), e, exc_info=True)
+                seq = record["seq"]
 
-    def _fetch_batch(self, after_seq: int) -> list[dict]:
+        self.analytics_store.set_watermark(seq, len(batch))
+
+        for date in dates_to_refresh:
+            try:
+                self.analytics_store.refresh_daily_stats(date)
+            except Exception as e:
+                logger.warning("Failed to refresh daily stats for %s: %s", date, e)
+
+        return seq, len(batch)
+
+    def _fetch_batch(self, after_seq: int, until: str | None = None) -> list[dict]:
         try:
             conn = sqlite3.connect(self.config.raw_db, timeout=10)
             conn.row_factory = sqlite3.Row
+            query = """SELECT * FROM raw_requests WHERE seq > ?"""
+            params: list[object] = [after_seq]
+            if until:
+                query += " AND timestamp <= ?"
+                params.append(until)
+            query += " ORDER BY seq ASC LIMIT ?"
+            params.append(self.config.batch_size)
             rows = conn.execute(
-                """SELECT * FROM raw_requests WHERE seq > ?
-                   ORDER BY seq ASC LIMIT ?""",
-                (after_seq, self.config.batch_size),
+                query,
+                params,
             ).fetchall()
             conn.close()
             return [dict(r) for r in rows]

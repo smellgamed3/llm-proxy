@@ -39,6 +39,35 @@
       <tbody id="conv-tbody"></tbody>
     </table>
     <div class="pagination" id="pagination"></div>
+    <section class="detail-panel" id="conversation-detail" hidden>
+      <div class="detail-header">
+        <h2>Conversation Detail</h2>
+        <button type="button" class="detail-close" onclick="hideConversationDetail()">Close</button>
+      </div>
+      <div class="detail-meta" id="detail-meta"></div>
+      <div class="detail-grid">
+        <div>
+          <h3>System Prompt</h3>
+          <pre id="detail-system-prompt"></pre>
+        </div>
+        <div>
+          <h3>User Prompt</h3>
+          <pre id="detail-user-prompt"></pre>
+        </div>
+        <div>
+          <h3>Assistant Response</h3>
+          <pre id="detail-assistant-response"></pre>
+        </div>
+        <div>
+          <h3>Raw Request Body</h3>
+          <pre id="detail-request-body"></pre>
+        </div>
+        <div>
+          <h3>Raw Response Body</h3>
+          <pre id="detail-response-body"></pre>
+        </div>
+      </div>
+    </section>
   </main>
   <script src="app.js"></script>
   <script>
