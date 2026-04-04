@@ -1,4 +1,10 @@
 services:
+  llm-provider:
+    image: hashicorp/http-echo:1.0.0
+    container_name: llm-provider-dev
+    restart: unless-stopped
+    command: ["-listen=:8080", "-text={\"ok\":true}"]
+
   llm-proxy:
     build:
       context: .
@@ -12,7 +18,7 @@ services:
     ports:
       - "${PROXY_PORT:-9090}:9090"
     environment:
-      UPSTREAM_URL: ${UPSTREAM_URL:-http://localhost:8080}
+      UPSTREAM_URL: ${UPSTREAM_URL:-http://llm-provider:8080}
       LISTEN_PORT: "9090"
       LOG_DIR: /data/logs
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -23,6 +29,8 @@ services:
       - ./analyzer:/app/analyzer
       - ./config.yaml:/etc/llm-proxy/config.yaml:ro
       - ./pricing.yaml:/etc/llm-proxy/pricing.yaml:ro
+    depends_on:
+      - llm-provider
     labels:
       # Traefik 配置
       - "traefik.enable=true"
@@ -74,6 +82,8 @@ services:
       RAW_DB: /data/logs/raw.db
       ANALYTICS_DB: /data/analytics/analytics.db
       BODIES_DIR: /data/logs/bodies
+      ADMIN_KEY_HASH: ${ADMIN_KEY_HASH:-}
+      DASHBOARD_API_KEY: ${DASHBOARD_API_KEY:-}
     volumes:
       - llm-proxy-logs:/data/logs
       - llm-analytics:/data/analytics

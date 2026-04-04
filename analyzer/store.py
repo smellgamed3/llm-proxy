@@ -142,6 +142,7 @@ class AnalyticsStore:
             ("trace_id", "TEXT"),
             ("parent_id", "TEXT"),
             ("span_name", "TEXT"),
+            ("api_key_hash", "TEXT"),
         ]
         for col, col_type in migrations:
             if col not in existing:
@@ -150,6 +151,9 @@ class AnalyticsStore:
                 )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_conv_trace ON conversations(trace_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_conv_api_key_hash ON conversations(api_key_hash)"
         )
 
         sync_job_existing = {

@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from api.app import create_app
 from analyzer.store import AnalyticsStore
+from tests.test_api.conftest import ADMIN_HEADERS
 
 
 @pytest.fixture
@@ -32,7 +33,7 @@ def client(analytics_db_path: str, tmp_path: Path, monkeypatch):
     # Initialize schema
     AnalyticsStore(analytics_db_path)
     app = create_app()
-    return TestClient(app)
+    return TestClient(app, headers=ADMIN_HEADERS)
 
 
 class TestOverviewEmpty:

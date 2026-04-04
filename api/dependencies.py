@@ -3,9 +3,85 @@ from __future__ import annotations
 import hmac
 import os
 import sqlite3
-from typing import Generator
+from dataclasses import dataclass, field
+from typing import Generator, Optional
 
-from fastapi import Header, HTTPException, status
+from fastapi import Header, HTTPException, Query, status
+
+
+@dataclass
+class AuthContext:
+    """Resolved auth context for the current request."""
+    is_admin: bool = False
+    key_hashes: list[str] = field(default_factory=list)
+
+    def where_clause(self, col: str = "api_key_hash") -> tuple[str, list[str]]:
+        """Return (SQL fragment, params) for filtering by key_hashes.
+
+        Admin sees everything (empty WHERE). Regular users get an IN clause.
+        """
+        if self.is_admin:
+            return "", []
+        if not self.key_hashes:
+            # No keys → match nothing
+            return f"{col} = '__none__'", []
+        placeholders = ",".join("?" for _ in self.key_hashes)
+        return f"{col} IN ({placeholders})", list(self.key_hashes)
+
+
+def resolve_auth(
+    authorization: Optional[str] = Header(default=None),
+    key_hashes: Optional[str] = Query(default=None, alias="key_hashes"),
+) -> AuthContext:
+    """Resolve the auth context from request headers / query params.
+
+    Auth model:
+    - ``ADMIN_KEY_HASH`` env var: the hash that grants full access.
+    - ``Authorization: Bearer <key_hash>`` or ``?key_hashes=h1,h2``: scoped access.
+    - ``DASHBOARD_API_KEY`` env var (legacy): if set, must match Bearer token.
+    """
+    admin_hash = os.getenv("ADMIN_KEY_HASH", "").strip()
+    legacy_key = os.getenv("DASHBOARD_API_KEY", "").strip()
+
+    bearer_token: str = ""
+    if authorization and authorization.lower().startswith("bearer "):
+        bearer_token = authorization[7:].strip()
+
+    # Legacy gate: if DASHBOARD_API_KEY is set, the bearer token must match it
+    if legacy_key:
+        if not bearer_token or not hmac.compare_digest(bearer_token, legacy_key):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or missing API key",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        # Legacy mode: treat as admin (backward compatible)
+        return AuthContext(is_admin=True)
+
+    # Collect hashes from bearer token and query param
+    hashes: list[str] = []
+    if bearer_token:
+        hashes.append(bearer_token)
+    if key_hashes:
+        for h in key_hashes.split(","):
+            h = h.strip()
+            if h and h not in hashes:
+                hashes.append(h)
+
+    # If no hashes provided at all, reject
+    if not hashes:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="API key hash required. Provide via Authorization header or key_hashes query param.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # Check admin
+    is_admin = any(
+        admin_hash and hmac.compare_digest(h, admin_hash) for h in hashes
+    )
+
+    return AuthContext(is_admin=is_admin, key_hashes=hashes)
 
 
 def get_analytics_db() -> Generator[sqlite3.Connection, None, None]:
@@ -30,26 +106,3 @@ def get_raw_db() -> Generator[sqlite3.Connection, None, None]:
 
 def get_bodies_dir() -> str:
     return os.getenv("BODIES_DIR", "/data/logs/bodies")
-
-
-def verify_api_key(authorization: str | None = Header(default=None)) -> None:
-    """Optional Bearer-token gate.
-
-    When ``DASHBOARD_API_KEY`` env var is set every request to an API route
-    must carry a matching ``Authorization: Bearer <key>`` header.
-    When the env var is unset the check is skipped (backward compatible).
-    """
-    required_key = os.getenv("DASHBOARD_API_KEY", "").strip()
-    if not required_key:
-        return  # auth disabled
-
-    token: str = ""
-    if authorization and authorization.lower().startswith("bearer "):
-        token = authorization[7:]
-
-    if not token or not hmac.compare_digest(token, required_key):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or missing API key",
-            headers={"WWW-Authenticate": "Bearer"},
-        )

@@ -6,14 +6,14 @@ from fastapi import Depends, FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from .routers import overview, conversations, costs, latency, prompts, models, errors, admin
-from .dependencies import verify_api_key
+from .dependencies import resolve_auth
 
 
 def create_app() -> FastAPI:
     app = FastAPI(title="LLM Proxy Analytics API", version="0.2.5")
     app.state.analyzer_sync_manager = admin.AnalyzerSyncManager()
 
-    api_deps = [Depends(verify_api_key)]
+    api_deps = [Depends(resolve_auth)]
 
     app.include_router(overview.router, prefix="/api", dependencies=api_deps)
     app.include_router(conversations.router, prefix="/api", dependencies=api_deps)

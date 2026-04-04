@@ -143,7 +143,8 @@ curl -s http://localhost:9090/health
 # → {"status": "ok"}
 
 # API 服务
-curl -s http://localhost:9091/api/admin/analyzer/status
+curl -s http://localhost:9091/api/admin/analyzer/status \
+  -H 'Authorization: Bearer <ADMIN_KEY_HASH>'
 # → {"watermark_seq": 12345, "records_processed": 12345, "conversation_count": 12345, "template_count": 120}
 
 # Docker 层面

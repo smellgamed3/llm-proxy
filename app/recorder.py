@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -95,6 +96,7 @@ class Recorder:
                 upstream_url         TEXT,
                 provider             TEXT,
                 error                TEXT,
+                api_key_hash         TEXT,
                 created_at           TEXT DEFAULT (datetime('now'))
             );
             CREATE INDEX IF NOT EXISTS idx_raw_requests_timestamp ON raw_requests(timestamp);
@@ -131,7 +133,31 @@ class Recorder:
             );
             CREATE INDEX IF NOT EXISTS idx_raw_ws_messages_conn ON raw_ws_messages(connection_id);
         """)
+        self._migrate_db(conn)
         conn.commit()
+
+    def _migrate_db(self, conn: sqlite3.Connection) -> None:
+        raw_request_columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(raw_requests)").fetchall()
+        }
+        if "api_key_hash" not in raw_request_columns:
+            conn.execute("ALTER TABLE raw_requests ADD COLUMN api_key_hash TEXT")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_raw_requests_api_key_hash ON raw_requests(api_key_hash)"
+        )
+
+    @staticmethod
+    def extract_api_key_hash(headers: dict) -> str | None:
+        """Extract and hash the API key from request headers (SHA-256, first 32 hex chars)."""
+        auth = headers.get("authorization") or headers.get("Authorization") or ""
+        if auth.lower().startswith("bearer "):
+            key = auth[7:].strip()
+        else:
+            key = (headers.get("x-api-key") or headers.get("X-Api-Key") or "").strip()
+        if not key:
+            return None
+        return hashlib.sha256(key.encode()).hexdigest()[:32]
 
     def new_request_id(self) -> str:
         return str(uuid.uuid4())
@@ -209,13 +235,14 @@ class Recorder:
         if body:
             body_ref, body_size = self._write_jsonl(request_id, "request", body)
 
+        api_key_hash = self.extract_api_key_hash(headers)
         seq = self._seq.next()
         conn = self._get_conn()
         conn.execute(
             """INSERT INTO raw_requests (id, seq, timestamp, method, path, query_string,
                request_headers, request_body_ref, request_body_size,
-               client_ip, client_port, upstream_url)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               client_ip, client_port, upstream_url, api_key_hash)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 request_id,
                 seq,
@@ -229,6 +256,7 @@ class Recorder:
                 client_ip,
                 client_port,
                 upstream_url,
+                api_key_hash,
             ),
         )
         conn.commit()

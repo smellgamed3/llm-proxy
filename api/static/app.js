@@ -2,6 +2,61 @@
 
 const API = '/api';
 
+// ── API Key Hash Management ───────────────────────────────────────────────
+
+const KEY_STORAGE_KEY = 'llm_proxy_key_hashes';
+
+function getStoredKeyHashes() {
+  try {
+    const raw = localStorage.getItem(KEY_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch { return []; }
+}
+
+function saveKeyHashes(hashes) {
+  localStorage.setItem(KEY_STORAGE_KEY, JSON.stringify(hashes));
+}
+
+function addKeyHash(hash, label) {
+  const hashes = getStoredKeyHashes();
+  if (hashes.some(h => h.hash === hash)) return false;
+  hashes.push({ hash, label: label || hash.slice(0, 8) + '…', addedAt: new Date().toISOString() });
+  saveKeyHashes(hashes);
+  return true;
+}
+
+function removeKeyHash(hash) {
+  const hashes = getStoredKeyHashes().filter(h => h.hash !== hash);
+  saveKeyHashes(hashes);
+}
+
+async function computeKeyHash(apiKey) {
+  const data = new TextEncoder().encode(apiKey.trim());
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  const fullHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+  return fullHex.slice(0, 32);
+}
+
+function getActiveKeyHashes() {
+  return getStoredKeyHashes().map(h => h.hash);
+}
+
+function buildAuthQuery() {
+  const hashes = getActiveKeyHashes();
+  if (hashes.length === 0) return '';
+  return 'key_hashes=' + hashes.map(encodeURIComponent).join(',');
+}
+
+function appendAuthToUrl(url) {
+  const authQuery = buildAuthQuery();
+  if (!authQuery) return url;
+  const separator = url.includes('?') ? '&' : '?';
+  return url + separator + authQuery;
+}
+
 // ── Toast notification system ─────────────────────────────────────────────
 
 let _toastContainer = null;
@@ -31,17 +86,37 @@ function showToast(message, type = 'info', duration = 4000) {
 }
 
 async function requestJSON(url, options = {}) {
+  const authedUrl = appendAuthToUrl(url);
   const headers = { ...(options.headers || {}) };
   if (options.body != null && !headers['Content-Type']) {
     headers['Content-Type'] = 'application/json';
   }
-  const r = await fetch(url, { ...options, headers });
-  if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+  const r = await fetch(authedUrl, { ...options, headers });
+  if (r.status === 401) {
+    showKeyModal('请添加 API Key 以访问数据');
+    throw new Error('Unauthorized — no key hashes');
+  }
+  if (!r.ok) {
+    const error = new Error(`${r.status} ${r.statusText}`);
+    error.status = r.status;
+    throw error;
+  }
   return r.json();
 }
 
 async function fetchJSON(url) {
   return requestJSON(url);
+}
+
+async function fetchOptionalJSON(url, allowedStatuses = [403]) {
+  try {
+    return await requestJSON(url);
+  } catch (error) {
+    if (allowedStatuses.includes(error.status)) {
+      return null;
+    }
+    throw error;
+  }
 }
 
 function fmt(n, decimals = 0) {
@@ -98,7 +173,7 @@ async function loadOverview() {
       fetchJSON(`${API}/overview`),
       fetchJSON(`${API}/overview/daily?days=${overviewDays}`),
       fetchJSON(`${API}/models/usage`),
-      fetchJSON(`${API}/admin/status`),
+      fetchOptionalJSON(`${API}/admin/status`),
     ]);
 
     document.getElementById('total-requests').textContent = fmt(summary.total_requests);
@@ -114,8 +189,13 @@ async function loadOverview() {
     renderTrendChart(daily);
     renderOverviewModelChart(modelUsage);
     renderOverviewTokenChart(daily);
-    renderDatabaseObservability(adminStatus);
-    scheduleOverviewRefresh(adminStatus.worker);
+    if (adminStatus) {
+      renderDatabaseObservability(adminStatus);
+      scheduleOverviewRefresh(adminStatus.worker);
+    } else {
+      renderObservabilityRestricted();
+      scheduleOverviewRefresh(null);
+    }
   } catch (e) {
     console.error('Overview load error:', e);
   }
@@ -355,6 +435,27 @@ function renderDatabaseObservability(status) {
   renderWorkerStatus(worker);
 }
 
+function renderObservabilityRestricted() {
+  setIfPresent('obs-raw-total', 'Restricted');
+  setIfPresent('obs-raw-finalized', 'Restricted');
+  setIfPresent('obs-raw-backlog', 'Restricted');
+  setIfPresent('obs-analytics-conversations', 'Restricted');
+  setIfPresent('obs-analytics-templates', 'Restricted');
+  setIfPresent('obs-worker-status', 'Admin only');
+
+  renderMetricTable('raw-db-metrics', [
+    ['Access', 'Admin only'],
+  ]);
+  renderMetricTable('analytics-db-metrics', [
+    ['Access', 'Admin only'],
+  ]);
+
+  const obsWorkerStatus = document.getElementById('obs-worker-status');
+  if (obsWorkerStatus) {
+    obsWorkerStatus.className = 'card-value card-value-status';
+  }
+}
+
 let analyzerPollHandle = null;
 let analyzerAutoRefresh = true;
 let _analyzerPrevStatus = null;
@@ -458,9 +559,17 @@ function renderAnalyzerHistory(history) {
 async function refreshAnalyzerStatus() {
   try {
     const [status, history] = await Promise.all([
-      fetchJSON(`${API}/admin/status`),
-      fetchJSON(`${API}/admin/analyzer/history?limit=15`),
+      fetchOptionalJSON(`${API}/admin/status`),
+      fetchOptionalJSON(`${API}/admin/analyzer/history?limit=15`),
     ]);
+    if (!status || !history) {
+      renderObservabilityRestricted();
+      renderAnalyzerHistory([]);
+      updateAnalyzerButtons(null);
+      setAnalyzerNotice('当前 key 无管理权限，Analyzer 管理功能仅 admin 可用。', 'warning');
+      stopAnalyzerPolling();
+      return;
+    }
     renderDatabaseObservability(status);
     renderAnalyzerHistory(history);
     updateAnalyzerButtons(status.worker);
@@ -2816,7 +2925,116 @@ function initModelsTimeRange() {
 
 // ── Auto-detect page ──────────────────────────────────────────────────────
 
+// ── Key Management UI ─────────────────────────────────────────────────────
+
+function renderKeyManager() {
+  const container = document.getElementById('key-manager');
+  if (!container) return;
+  const hashes = getStoredKeyHashes();
+
+  let html = '';
+  if (hashes.length === 0) {
+    html = `<button class="key-add-btn" onclick="showKeyModal()">+ Add API Key</button>`;
+  } else {
+    html = `<div class="key-chips">`;
+    for (const h of hashes) {
+      html += `<span class="key-chip" title="${escapeHtml(h.hash)}">
+        <span class="key-chip-label">${escapeHtml(h.label)}</span>
+        <button class="key-chip-copy" onclick="copyHash('${escapeHtml(h.hash)}')" title="Copy hash">⧉</button>
+        <button class="key-chip-remove" onclick="removeKey('${escapeHtml(h.hash)}')" title="Remove">×</button>
+      </span>`;
+    }
+    html += `<button class="key-add-btn key-add-btn-small" onclick="showKeyModal()">+</button></div>`;
+  }
+  container.innerHTML = html;
+}
+
+function showKeyModal(message) {
+  let modal = document.getElementById('key-modal');
+  if (modal) modal.remove();
+
+  modal = document.createElement('div');
+  modal.id = 'key-modal';
+  modal.className = 'modal-overlay';
+  modal.innerHTML = `
+    <div class="modal-box key-modal-box">
+      <h3>添加 API Key</h3>
+      ${message ? `<p class="key-modal-msg">${escapeHtml(message)}</p>` : ''}
+      <p class="key-modal-hint">输入您的 LLM API Key，系统会在浏览器中计算 SHA-256 哈希值。<br>原始 Key 不会被发送或存储。</p>
+      <input type="password" id="key-modal-input" class="key-modal-input" placeholder="sk-..." autocomplete="off" />
+      <input type="text" id="key-modal-label" class="key-modal-input" placeholder="标签 (可选, 如 'Production Key')" />
+      <div class="key-modal-or">── 或直接输入 Hash ──</div>
+      <input type="text" id="key-modal-hash-input" class="key-modal-input" placeholder="已知的 32 位 hex hash" maxlength="32" />
+      <div class="key-modal-actions">
+        <button class="btn" onclick="closeKeyModal()">取消</button>
+        <button class="btn btn-primary" onclick="submitKey()">添加</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) closeKeyModal();
+  });
+  document.getElementById('key-modal-input').focus();
+}
+
+function closeKeyModal() {
+  const modal = document.getElementById('key-modal');
+  if (modal) modal.remove();
+}
+
+async function submitKey() {
+  const apiKeyInput = document.getElementById('key-modal-input');
+  const labelInput = document.getElementById('key-modal-label');
+  const hashInput = document.getElementById('key-modal-hash-input');
+
+  const rawKey = (apiKeyInput.value || '').trim();
+  const directHash = (hashInput.value || '').trim();
+  const label = (labelInput.value || '').trim();
+
+  let hash = '';
+  if (rawKey) {
+    hash = await computeKeyHash(rawKey);
+  } else if (directHash && /^[0-9a-f]{32}$/i.test(directHash)) {
+    hash = directHash.toLowerCase();
+  } else {
+    showToast('请输入 API Key 或有效的 32 位 hex hash', 'error');
+    return;
+  }
+
+  const added = addKeyHash(hash, label || (rawKey ? rawKey.slice(0, 6) + '…' : hash.slice(0, 8) + '…'));
+  closeKeyModal();
+  renderKeyManager();
+  if (added) {
+    showToast('Key 已添加 — hash: ' + hash, 'success');
+    location.reload();
+  } else {
+    showToast('此 Key 已存在', 'info');
+  }
+}
+
+function removeKey(hash) {
+  removeKeyHash(hash);
+  renderKeyManager();
+  showToast('Key 已移除', 'info');
+  location.reload();
+}
+
+async function copyHash(hash) {
+  try {
+    await navigator.clipboard.writeText(hash);
+    showToast('Hash 已复制到剪贴板', 'success', 2000);
+  } catch {
+    showToast('复制失败', 'error');
+  }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
+  // Initialize key management UI
+  renderKeyManager();
+  if (getActiveKeyHashes().length === 0) {
+    showKeyModal('首次使用请添加 API Key');
+  }
+
   const path = window.location.pathname;
   if (path === '/' || path.endsWith('index.html')) {
     initOverviewTimeRange();

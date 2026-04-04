@@ -11,7 +11,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from analyzer.body_reader import BodyReader
-from api.dependencies import get_analytics_db, get_raw_db, get_bodies_dir
+from api.dependencies import get_analytics_db, get_raw_db, get_bodies_dir, resolve_auth, AuthContext
 
 router = APIRouter(tags=["conversations"])
 
@@ -40,6 +40,7 @@ def list_conversations(
     sort: str = "timestamp",
     order: str = "desc",
     db: sqlite3.Connection = Depends(get_analytics_db),
+    auth: AuthContext = Depends(resolve_auth),
 ) -> dict:
     """List conversations with filtering and pagination."""
     allowed_sort = {"timestamp", "duration_ms", "cost_usd", "total_tokens"}
@@ -49,6 +50,12 @@ def list_conversations(
 
     where_clauses: list[str] = []
     params: list[Any] = []
+
+    # Auth-based key filtering
+    key_where, key_params = auth.where_clause()
+    if key_where:
+        where_clauses.append(key_where)
+        params.extend(key_params)
 
     if model:
         where_clauses.append("model = ?")
@@ -115,6 +122,7 @@ def export_conversations(
     template_id: str | None = None,
     limit: int = 10000,
     db: sqlite3.Connection = Depends(get_analytics_db),
+    auth: AuthContext = Depends(resolve_auth),
 ):
     """Export conversations as JSONL or CSV."""
     if fmt not in ("jsonl", "csv"):
@@ -122,6 +130,12 @@ def export_conversations(
 
     where_clauses: list[str] = []
     params: list[Any] = []
+
+    # Auth-based key filtering
+    key_where, key_params = auth.where_clause()
+    if key_where:
+        where_clauses.append(key_where)
+        params.extend(key_params)
 
     if model:
         where_clauses.append("model = ?")
@@ -184,6 +198,7 @@ def get_conversation(
     conv_id: str,
     db: sqlite3.Connection = Depends(get_analytics_db),
     raw_db: sqlite3.Connection = Depends(get_raw_db),
+    auth: AuthContext = Depends(resolve_auth),
 ) -> dict:
     """Get full conversation detail including extracted fields."""
     row = db.execute(
@@ -192,6 +207,10 @@ def get_conversation(
     if row is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
     data = dict(row)
+    # Scope check: non-admin can only view their own key's conversations
+    if not auth.is_admin:
+        if data.get("api_key_hash") not in auth.key_hashes:
+            raise HTTPException(status_code=404, detail="Conversation not found")
     if data.get("tools_list"):
         try:
             data["tools_list"] = json.loads(data["tools_list"])
@@ -205,8 +224,18 @@ def get_raw_conversation(
     conv_id: str,
     raw_db: sqlite3.Connection = Depends(get_raw_db),
     bodies_dir: str = Depends(get_bodies_dir),
+    db: sqlite3.Connection = Depends(get_analytics_db),
+    auth: AuthContext = Depends(resolve_auth),
 ) -> dict:
     """Get raw request/response data from raw.db."""
+    # Scope check via analytics conversation
+    if not auth.is_admin:
+        conv_row = db.execute(
+            "SELECT api_key_hash FROM conversations WHERE id = ?", (conv_id,)
+        ).fetchone()
+        if conv_row is None or conv_row["api_key_hash"] not in auth.key_hashes:
+            raise HTTPException(status_code=404, detail="Raw record not found")
+
     row = raw_db.execute(
         "SELECT * FROM raw_requests WHERE id = ?", (conv_id,)
     ).fetchone()

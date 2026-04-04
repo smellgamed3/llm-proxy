@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from api.app import create_app
 from analyzer.store import AnalyticsStore
+from tests.test_api.conftest import ADMIN_HEADERS
 
 
 @pytest.fixture
@@ -53,7 +54,7 @@ def client(analytics_db_path: str, raw_db_path: str, tmp_path: Path, monkeypatch
     monkeypatch.setenv("BODIES_DIR", str(tmp_path / "bodies"))
     # Initialize analytics schema
     AnalyticsStore(analytics_db_path)
-    return TestClient(create_app())
+    return TestClient(create_app(), headers=ADMIN_HEADERS)
 
 
 def _make_conv(idx: int, model: str = "gpt-4o", status: str = "success") -> dict:

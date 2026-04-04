@@ -79,6 +79,79 @@ class TestRecorderSchema:
         assert rec.bodies_dir.exists()
         assert rec.bodies_dir.is_dir()
 
+    def test_existing_raw_db_is_migrated_for_api_key_hash(self, tmp_path: Path):
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        legacy_db = log_dir / "raw.db"
+        conn = sqlite3.connect(str(legacy_db))
+        conn.executescript(
+            """
+            CREATE TABLE raw_requests (
+                id                   TEXT PRIMARY KEY,
+                seq                  INTEGER UNIQUE,
+                timestamp            TEXT NOT NULL,
+                method               TEXT NOT NULL,
+                path                 TEXT NOT NULL,
+                query_string         TEXT,
+                request_headers      TEXT,
+                request_body_ref     TEXT,
+                request_body_size    INTEGER,
+                status_code          INTEGER,
+                response_headers     TEXT,
+                response_body_ref    TEXT,
+                response_body_size   INTEGER,
+                is_stream            INTEGER DEFAULT 0,
+                duration_ms          REAL,
+                client_ip            TEXT,
+                client_port          INTEGER,
+                upstream_url         TEXT,
+                provider             TEXT,
+                error                TEXT,
+                created_at           TEXT DEFAULT (datetime('now'))
+            );
+            CREATE INDEX idx_raw_requests_timestamp ON raw_requests(timestamp);
+            CREATE INDEX idx_raw_requests_path ON raw_requests(path);
+            CREATE INDEX idx_raw_requests_seq ON raw_requests(seq);
+
+            CREATE TABLE raw_ws_connections (
+                id              TEXT PRIMARY KEY,
+                seq             INTEGER UNIQUE,
+                timestamp       TEXT NOT NULL,
+                path            TEXT NOT NULL,
+                query_string    TEXT,
+                request_headers TEXT,
+                subprotocol     TEXT,
+                closed_at       TEXT,
+                duration_ms     REAL,
+                message_count   INTEGER DEFAULT 0,
+                client_ip       TEXT,
+                client_port     INTEGER
+            );
+            CREATE TABLE raw_ws_messages (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                connection_id   TEXT NOT NULL,
+                direction       TEXT NOT NULL,
+                message_type    TEXT NOT NULL,
+                data            TEXT,
+                data_size       INTEGER,
+                timestamp       TEXT NOT NULL,
+                FOREIGN KEY (connection_id) REFERENCES raw_ws_connections(id)
+            );
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        rec = Recorder(Config(log_dir=str(log_dir)))
+        columns = {
+            row[1]
+            for row in sqlite3.connect(str(rec.db_path)).execute(
+                "PRAGMA table_info(raw_requests)"
+            ).fetchall()
+        }
+
+        assert "api_key_hash" in columns
+
 
 class TestRecordRequest:
     def test_basic_fields_stored(self, rec: Recorder):

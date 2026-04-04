@@ -14,9 +14,17 @@ from pydantic import BaseModel
 from analyzer.config import load_analyzer_config
 from analyzer.worker import AnalyzerWorker
 from analyzer.store import AnalyticsStore
-from api.dependencies import get_analytics_db, get_raw_db
+from api.dependencies import get_analytics_db, get_raw_db, resolve_auth, AuthContext
 
 router = APIRouter(tags=["admin"])
+
+
+def _require_admin(auth: AuthContext) -> None:
+    if not auth.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required",
+        )
 
 
 class RerunRequest(BaseModel):
@@ -331,15 +339,19 @@ def get_status(
     analytics_db: sqlite3.Connection = Depends(get_analytics_db),
     raw_db: sqlite3.Connection = Depends(get_raw_db),
     sync_manager: AnalyzerSyncManager = Depends(get_sync_manager),
+    auth: AuthContext = Depends(resolve_auth),
 ) -> dict[str, Any]:
     """Return analytics system status."""
+    _require_admin(auth)
     return _build_status(analytics_db, raw_db, sync_manager)
 
 
 @router.get("/admin/analyzer/job")
 def get_analyzer_job(
     sync_manager: AnalyzerSyncManager = Depends(get_sync_manager),
+    auth: AuthContext = Depends(resolve_auth),
 ) -> dict[str, Any]:
+    _require_admin(auth)
     return sync_manager.snapshot()
 
 
@@ -347,14 +359,18 @@ def get_analyzer_job(
 def get_analyzer_history(
     limit: int = 20,
     sync_manager: AnalyzerSyncManager = Depends(get_sync_manager),
+    auth: AuthContext = Depends(resolve_auth),
 ) -> list[dict[str, Any]]:
+    _require_admin(auth)
     return sync_manager.history(limit=limit)
 
 
 @router.post("/admin/analyzer/stop")
 def stop_analyzer_sync(
     sync_manager: AnalyzerSyncManager = Depends(get_sync_manager),
+    auth: AuthContext = Depends(resolve_auth),
 ) -> dict[str, Any]:
+    _require_admin(auth)
     try:
         state = sync_manager.stop()
     except RuntimeError as exc:
@@ -366,8 +382,11 @@ def stop_analyzer_sync(
 
 
 @router.post("/admin/reset")
-def reset_analytics() -> dict:
+def reset_analytics(
+    auth: AuthContext = Depends(resolve_auth),
+) -> dict:
     """Reset analytics database (clear all derived data)."""
+    _require_admin(auth)
     db_path = os.getenv("ANALYTICS_DB", "/data/analytics/analytics.db")
     store = AnalyticsStore(db_path)
     store.reset()
@@ -378,7 +397,9 @@ def reset_analytics() -> dict:
 def start_analyzer_sync(
     request: RerunRequest,
     sync_manager: AnalyzerSyncManager = Depends(get_sync_manager),
+    auth: AuthContext = Depends(resolve_auth),
 ) -> dict[str, Any]:
+    _require_admin(auth)
     try:
         state = sync_manager.start(request)
     except RuntimeError as exc:
@@ -390,8 +411,12 @@ def start_analyzer_sync(
 
 
 @router.post("/admin/analyzer/rerun")
-def rerun_analyzer(request: RerunRequest) -> dict:
+def rerun_analyzer(
+    request: RerunRequest,
+    auth: AuthContext = Depends(resolve_auth),
+) -> dict:
     """Run analyzer in one-shot mode for full/range/incremental catch-up."""
+    _require_admin(auth)
     config = load_analyzer_config()
     config.mode = request.mode
     config.since = request.since
@@ -411,7 +436,9 @@ def rerun_analyzer(request: RerunRequest) -> dict:
 def retry_analyzer_sync(
     job_id: int,
     sync_manager: AnalyzerSyncManager = Depends(get_sync_manager),
+    auth: AuthContext = Depends(resolve_auth),
 ) -> dict[str, Any]:
+    _require_admin(auth)
     """Retry a previous sync job with the same parameters."""
     try:
         state = sync_manager.retry(job_id)
@@ -478,12 +505,18 @@ def _list_backups() -> list[dict[str, Any]]:
 
 
 @router.post("/admin/backup")
-def create_backup() -> dict[str, Any]:
+def create_backup(
+    auth: AuthContext = Depends(resolve_auth),
+) -> dict[str, Any]:
     """Create a timestamped backup of raw.db and analytics.db."""
+    _require_admin(auth)
     return _create_backup()
 
 
 @router.get("/admin/backups")
-def list_backups() -> list[dict[str, Any]]:
+def list_backups(
+    auth: AuthContext = Depends(resolve_auth),
+) -> list[dict[str, Any]]:
     """List available backup files."""
+    _require_admin(auth)
     return _list_backups()

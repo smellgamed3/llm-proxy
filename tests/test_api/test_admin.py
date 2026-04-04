@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from api.app import create_app
 from analyzer.store import AnalyticsStore
 from analyzer.worker import AnalyzerWorker
+from tests.test_api.conftest import ADMIN_HEADERS
 
 
 @pytest.fixture
@@ -72,8 +73,7 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     conn.commit()
     conn.close()
 
-    return TestClient(create_app())
-
+    return TestClient(create_app(), headers=ADMIN_HEADERS)
 
 def test_admin_status_alias(client: TestClient):
     response = client.get("/api/admin/analyzer/status")

@@ -24,11 +24,14 @@
 
 ```bash
 # .env 文件（或直接 export）
-UPSTREAM_URL=http://your-llm-service:8080    # 下游 LLM 服务地址
+UPSTREAM_URL=http://your-llm-service:8080    # 下游 LLM 服务基地址，不要追加 /v1
 PROXY_PORT=9090                               # 代理监听端口
 API_PORT=9091                                 # API/Dashboard 端口
 LOG_LEVEL=INFO                                # 日志级别
+ADMIN_KEY_HASH=0123456789abcdef0123456789abcdef  # Admin hash（SHA-256 前 32 位）
 ```
+
+说明：客户端请求通常会访问 `/v1/chat/completions`、`/v1/embeddings` 等路径，因此 `UPSTREAM_URL` 只应配置到服务根地址。如果把 `/v1` 也写进 `UPSTREAM_URL`，代理会转发出重复路径，例如 `/v1/v1/chat/completions`。
 
 ### 2.3 docker-compose.yml
 
@@ -86,6 +89,8 @@ services:
       ANALYTICS_DB: /data/analytics/analytics.db
       RAW_DB: /data/logs/raw.db
       BODIES_DIR: /data/logs/bodies
+      ADMIN_KEY_HASH: ${ADMIN_KEY_HASH:-}
+      DASHBOARD_API_KEY: ${DASHBOARD_API_KEY:-}
       LISTEN_PORT: "9091"
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
@@ -175,7 +180,17 @@ uv run python -m analyzer --mode=range --since=2026-04-01 --until=2026-04-03
 ANALYTICS_DB=./logs/analytics.db \
 RAW_DB=./logs/raw.db \
 BODIES_DIR=./logs/bodies \
+ADMIN_KEY_HASH=your_admin_hash \
 uv run uvicorn api.app:create_app --factory --host 0.0.0.0 --port 9091
+```
+
+如需从真实 API key 计算 admin/scoped hash：
+
+```bash
+python3 - <<'PY'
+import hashlib
+print(hashlib.sha256(b'your-api-key').hexdigest()[:32])
+PY
 ```
 
 ## 4. 配置文件说明

@@ -55,6 +55,7 @@
 cp .env.example .env
 
 # 编辑 .env，至少设置上游地址
+# 注意：这里填的是上游服务基地址，不要追加 /v1
 # UPSTREAM_URL=http://your-llm-service:8080
 
 # 启动全部服务（代理 + 分析 + API）
@@ -64,7 +65,16 @@ docker compose up -d
 docker compose logs -f
 ```
 
-`docker compose` 会自动读取项目根目录的 `.env`。常用变量包括 `UPSTREAM_URL`、`PROXY_PORT`、`API_PORT`、`LOG_LEVEL`、`ANALYZER_INTERVAL`、`ANALYZER_BATCH_SIZE` 和 `TRAEFIK_HOST`。
+`docker compose` 会自动读取项目根目录的 `.env`。常用变量包括 `UPSTREAM_URL`、`PROXY_PORT`、`API_PORT`、`ADMIN_KEY_HASH`、`DASHBOARD_API_KEY`、`LOG_LEVEL`、`ANALYZER_INTERVAL`、`ANALYZER_BATCH_SIZE` 和 `TRAEFIK_HOST`。
+
+如果启用了 hash 鉴权，可用下面命令从真实 API key 计算 dashboard/API 使用的 hash：
+
+```bash
+python3 - <<'PY'
+import hashlib
+print(hashlib.sha256(b'your-api-key').hexdigest()[:32])
+PY
+```
 
 服务启动后：
 
@@ -92,6 +102,7 @@ uv run python -m analyzer
 
 # 启动 API（另一个终端）
 ANALYTICS_DB=./logs/analytics.db RAW_DB=./logs/raw.db BODIES_DIR=./logs/bodies \
+ADMIN_KEY_HASH=your_admin_hash \
 uv run uvicorn api.app:create_app --factory --host 0.0.0.0 --port 9091
 ```
 
@@ -101,13 +112,15 @@ uv run uvicorn api.app:create_app --factory --host 0.0.0.0 --port 9091
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `UPSTREAM_URL` | `http://localhost:8080` | 下游 LLM 服务地址 |
+| `UPSTREAM_URL` | `http://localhost:8080` | 下游 LLM 服务基地址，不要追加 `/v1` |
 | `LISTEN_PORT` | `9090` | 代理监听端口 |
 | `LOG_DIR` | `/data/logs` | 原始数据存储目录 |
 | `LOG_LEVEL` | `INFO` | 日志级别 |
 | `MAX_BODY_LOG_SIZE` | `10485760` | 单个 body 最大记录字节数 |
 | `PRESERVE_HOST` | `true` | 是否将客户端 `Host` 原样透传给下游 |
 | `CONFIG_FILE` | `/etc/llm-proxy/config.yaml` | 配置文件路径 |
+| `ADMIN_KEY_HASH` | 空 | Admin hash，匹配后可查看全部数据和管理接口 |
+| `DASHBOARD_API_KEY` | 空 | 旧版 Bearer 管理口令，兼容模式使用 |
 
 ### 配置文件 (`config.yaml`)
 
@@ -264,7 +277,8 @@ curl http://localhost:9090/health
 # → {"status": "ok"}
 
 # 分析 Worker 状态
-curl http://localhost:9091/api/admin/analyzer/status
+curl http://localhost:9091/api/admin/analyzer/status \
+  -H 'Authorization: Bearer <ADMIN_KEY_HASH>'
 # → {"watermark_seq": 12345, "records_processed": 12345, ...}
 ```
 
@@ -273,21 +287,27 @@ curl http://localhost:9091/api/admin/analyzer/status
 当使用 `docker-compose.yml`（生产编排）拉取远端 GHCR 镜像启动后，可用一条脚本做端到端验收：
 
 ```bash
+PROVIDER_API_KEY=sk-xxx \
+PROVIDER_MODEL=gpt-4o-mini \
+ADMIN_KEY_HASH=<admin-hash> \
 bash scripts/smoke_prod.sh
 ```
 
 默认会检查：
 
 - 代理健康接口
-- API 总览接口
-- 通过代理发送一条请求
-- 等待 analyzer 处理后检查 conversations
+- scoped 总览接口
+- 通过代理发送一条真实请求
+- 等待 analyzer 处理后检查 scoped conversations
 - 验证 `/api/conversations/{id}/raw` 回溯出的 request/response body
+- 可选验证 admin 管理接口
 
 如果你的宿主机端口不是默认值，可显式指定：
 
 ```bash
-PROXY_PORT=19090 API_PORT=19091 ANALYZER_WAIT_SECONDS=8 bash scripts/smoke_prod.sh
+PROXY_PORT=19090 API_PORT=19091 ANALYZER_WAIT_SECONDS=8 \
+PROVIDER_API_KEY=sk-xxx ADMIN_KEY_HASH=<admin-hash> \
+bash scripts/smoke_prod.sh
 ```
 
 ## 文档

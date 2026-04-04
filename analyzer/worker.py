@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import sqlite3
@@ -259,6 +260,17 @@ class AnalyzerWorker:
         # Fingerprint
         template_id = self.fingerprinter.fingerprint(result.system_prompt)
 
+        # Extract api_key_hash from raw record or compute from headers
+        api_key_hash = record.get("api_key_hash")
+        if not api_key_hash:
+            auth = request_headers.get("authorization") or request_headers.get("Authorization") or ""
+            if auth.lower().startswith("bearer "):
+                key = auth[7:].strip()
+            else:
+                key = (request_headers.get("x-api-key") or request_headers.get("X-Api-Key") or "").strip()
+            if key:
+                api_key_hash = hashlib.sha256(key.encode()).hexdigest()[:32]
+
         # Build conversation data
         timestamp = record.get("timestamp", "")
         date = timestamp[:10] if timestamp else ""
@@ -296,6 +308,7 @@ class AnalyzerWorker:
             "system_prompt": result.system_prompt,
             "user_prompt": result.user_prompt,
             "assistant_response": result.assistant_response,
+            "api_key_hash": api_key_hash,
         }
 
         self.analytics_store.upsert_conversation(conv_data)

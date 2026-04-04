@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from api.app import create_app
 from analyzer.store import AnalyticsStore
+from tests.test_api.conftest import ADMIN_HEADERS
 
 
 @pytest.fixture
@@ -18,7 +19,7 @@ def store_and_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[A
     monkeypatch.setenv("RAW_DB", str(tmp_path / "raw.db"))
     monkeypatch.setenv("BODIES_DIR", str(tmp_path / "bodies"))
     store = AnalyticsStore(str(analytics_db))
-    return store, TestClient(create_app())
+    return store, TestClient(create_app(), headers=ADMIN_HEADERS)
 
 
 def test_latency_summary_uses_p95(store_and_client: tuple[AnalyticsStore, TestClient]):

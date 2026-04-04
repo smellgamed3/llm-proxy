@@ -29,6 +29,17 @@ run_compose() {
   (cd "$PROJECT_DIR" && docker compose -f "$COMPOSE_FILE" "$@")
 }
 
+api_auth_args() {
+  if [[ -n "${ADMIN_KEY_HASH:-}" ]]; then
+    printf -- "-H\nAuthorization: Bearer %s\n" "$ADMIN_KEY_HASH"
+    return 0
+  fi
+  if [[ -n "${DASHBOARD_API_KEY:-}" ]]; then
+    printf -- "-H\nAuthorization: Bearer %s\n" "$DASHBOARD_API_KEY"
+    return 0
+  fi
+}
+
 usage() {
   cat <<'EOF'
 Usage:
@@ -98,7 +109,12 @@ case "$cmd" in
     run_compose ps
     ;;
   rerun)
-    curl -sf -X POST http://localhost:${API_PORT:-9091}/api/admin/analyzer/rerun \
+    auth_args=()
+    while IFS= read -r line; do
+      auth_args+=("$line")
+    done < <(api_auth_args)
+    curl -sf -X POST "http://localhost:${API_PORT:-9091}/api/admin/analyzer/rerun" \
+      "${auth_args[@]}" \
       -H 'content-type: application/json' \
       -d '{"mode":"full"}'
     echo

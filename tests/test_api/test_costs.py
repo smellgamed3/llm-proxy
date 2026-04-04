@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from api.app import create_app
 from analyzer.store import AnalyticsStore
+from tests.test_api.conftest import ADMIN_HEADERS
 
 
 @pytest.fixture
@@ -17,7 +18,7 @@ def store_and_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[A
     monkeypatch.setenv("RAW_DB", str(tmp_path / "raw.db"))
     monkeypatch.setenv("BODIES_DIR", str(tmp_path / "bodies"))
     store = AnalyticsStore(str(analytics_db))
-    return store, TestClient(create_app())
+    return store, TestClient(create_app(), headers=ADMIN_HEADERS)
 
 
 def _seed_daily_stats(store: AnalyticsStore) -> None:
@@ -36,6 +37,35 @@ def _seed_daily_stats(store: AnalyticsStore) -> None:
         )
 
 
+def _seed_conversations(store: AnalyticsStore) -> None:
+    """Seed conversations matching the daily_stats profile.
+
+    5 gpt-4o on 2024-01-01 (total_tokens=500, cost=0.05)
+    3 gpt-4o on 2024-01-02 (total_tokens=300, cost=0.03)
+    10 gpt-3.5-turbo on 2024-01-03 (total_tokens=800, cost=0.008)
+    """
+    seq = 0
+    for count, model, date, tokens, cost in [
+        (5, "gpt-4o", "2024-01-01", 500, 0.05),
+        (3, "gpt-4o", "2024-01-02", 300, 0.03),
+        (10, "gpt-3.5-turbo", "2024-01-03", 800, 0.008),
+    ]:
+        per_tok = tokens // count
+        per_cost = cost / count
+        for i in range(count):
+            seq += 1
+            store.upsert_conversation({
+                "id": f"conv-{seq}",
+                "seq": seq,
+                "timestamp": f"{date}T{10 + i:02d}:00:00Z",
+                "model": model,
+                "status": "success",
+                "cost_usd": per_cost,
+                "total_tokens": per_tok,
+                "duration_ms": 100.0,
+            })
+
+
 class TestCostsSummary:
     def test_empty_returns_zeros(self, store_and_client: tuple[AnalyticsStore, TestClient]):
         _, client = store_and_client
@@ -48,7 +78,7 @@ class TestCostsSummary:
 
     def test_sums_all_rows(self, store_and_client: tuple[AnalyticsStore, TestClient]):
         store, client = store_and_client
-        _seed_daily_stats(store)
+        _seed_conversations(store)
         r = client.get("/api/costs/summary")
         assert r.status_code == 200
         data = r.json()
@@ -58,7 +88,7 @@ class TestCostsSummary:
 
     def test_date_from_filter(self, store_and_client: tuple[AnalyticsStore, TestClient]):
         store, client = store_and_client
-        _seed_daily_stats(store)
+        _seed_conversations(store)
         r = client.get("/api/costs/summary?date_from=2024-01-02")
         assert r.status_code == 200
         data = r.json()
@@ -66,7 +96,7 @@ class TestCostsSummary:
 
     def test_date_to_filter(self, store_and_client: tuple[AnalyticsStore, TestClient]):
         store, client = store_and_client
-        _seed_daily_stats(store)
+        _seed_conversations(store)
         r = client.get("/api/costs/summary?date_to=2024-01-01")
         assert r.status_code == 200
         data = r.json()
@@ -74,7 +104,7 @@ class TestCostsSummary:
 
     def test_date_range_filter(self, store_and_client: tuple[AnalyticsStore, TestClient]):
         store, client = store_and_client
-        _seed_daily_stats(store)
+        _seed_conversations(store)
         r = client.get("/api/costs/summary?date_from=2024-01-01&date_to=2024-01-02")
         assert r.status_code == 200
         data = r.json()
@@ -90,7 +120,7 @@ class TestCostsByModel:
 
     def test_groups_by_model(self, store_and_client: tuple[AnalyticsStore, TestClient]):
         store, client = store_and_client
-        _seed_daily_stats(store)
+        _seed_conversations(store)
         r = client.get("/api/costs/by-model")
         assert r.status_code == 200
         items = r.json()
@@ -100,7 +130,7 @@ class TestCostsByModel:
 
     def test_sorted_by_cost_desc(self, store_and_client: tuple[AnalyticsStore, TestClient]):
         store, client = store_and_client
-        _seed_daily_stats(store)
+        _seed_conversations(store)
         r = client.get("/api/costs/by-model")
         items = r.json()
         costs = [item["cost_usd"] for item in items]
@@ -108,7 +138,7 @@ class TestCostsByModel:
 
     def test_date_filter_applied(self, store_and_client: tuple[AnalyticsStore, TestClient]):
         store, client = store_and_client
-        _seed_daily_stats(store)
+        _seed_conversations(store)
         # Only 2024-01-03 has gpt-3.5-turbo
         r = client.get("/api/costs/by-model?date_from=2024-01-03&date_to=2024-01-03")
         assert r.status_code == 200

@@ -5,7 +5,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from api.dependencies import get_analytics_db
+from api.dependencies import get_analytics_db, resolve_auth, AuthContext
 
 router = APIRouter(tags=["prompts"])
 
@@ -15,19 +15,43 @@ def list_prompt_templates(
     page: int = 1,
     page_size: int = 50,
     db: sqlite3.Connection = Depends(get_analytics_db),
+    auth: AuthContext = Depends(resolve_auth),
 ) -> dict:
     """List prompt templates sorted by usage count."""
-    count = db.execute("SELECT COUNT(*) FROM prompt_templates").fetchone()[0]
     offset = (page - 1) * page_size
-    rows = db.execute(
-        """SELECT template_id, first_seen, last_seen, use_count,
-                  total_cost_usd, avg_cost_usd,
-                  substr(system_prompt, 1, 200) AS system_prompt_preview
-           FROM prompt_templates
-           ORDER BY use_count DESC
-           LIMIT ? OFFSET ?""",
-        (page_size, offset),
-    ).fetchall()
+    if auth.is_admin:
+        count = db.execute("SELECT COUNT(*) FROM prompt_templates").fetchone()[0]
+        rows = db.execute(
+            """SELECT template_id, first_seen, last_seen, use_count,
+                      total_cost_usd, avg_cost_usd,
+                      substr(system_prompt, 1, 200) AS system_prompt_preview
+               FROM prompt_templates
+               ORDER BY use_count DESC
+               LIMIT ? OFFSET ?""",
+            (page_size, offset),
+        ).fetchall()
+    else:
+        key_where, key_params = auth.where_clause()
+        # Only show templates the user has conversations for
+        count = db.execute(
+            f"""SELECT COUNT(DISTINCT template_id) FROM conversations
+                WHERE template_id IS NOT NULL AND {key_where}""",
+            key_params,
+        ).fetchone()[0]
+        rows = db.execute(
+            f"""SELECT c.template_id, MIN(c.timestamp) AS first_seen,
+                      MAX(c.timestamp) AS last_seen, COUNT(*) AS use_count,
+                      SUM(COALESCE(c.cost_usd, 0)) AS total_cost_usd,
+                      AVG(COALESCE(c.cost_usd, 0)) AS avg_cost_usd,
+                      substr(pt.system_prompt, 1, 200) AS system_prompt_preview
+               FROM conversations c
+               LEFT JOIN prompt_templates pt ON c.template_id = pt.template_id
+               WHERE c.template_id IS NOT NULL AND {key_where}
+               GROUP BY c.template_id
+               ORDER BY use_count DESC
+               LIMIT ? OFFSET ?""",
+            key_params + [page_size, offset],
+        ).fetchall()
     return {
         "total": count,
         "page": page,
@@ -40,12 +64,22 @@ def list_prompt_templates(
 def get_prompt_template(
     template_id: str,
     db: sqlite3.Connection = Depends(get_analytics_db),
+    auth: AuthContext = Depends(resolve_auth),
 ) -> dict:
     row = db.execute(
         "SELECT * FROM prompt_templates WHERE template_id = ?", (template_id,)
     ).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Template not found")
+    if not auth.is_admin:
+        # Check that the user has at least one conversation with this template
+        key_where, key_params = auth.where_clause()
+        has = db.execute(
+            f"SELECT 1 FROM conversations WHERE template_id = ? AND {key_where} LIMIT 1",
+            [template_id] + key_params,
+        ).fetchone()
+        if not has:
+            raise HTTPException(status_code=404, detail="Template not found")
     return dict(row)
 
 
@@ -53,10 +87,13 @@ def get_prompt_template(
 def get_template_stats(
     template_id: str,
     db: sqlite3.Connection = Depends(get_analytics_db),
+    auth: AuthContext = Depends(resolve_auth),
 ) -> dict:
     """Return aggregated quality stats for a prompt template."""
+    key_where, key_params = auth.where_clause()
+    extra_where = f"AND {key_where}" if key_where else ""
     row = db.execute(
-        """SELECT
+        f"""SELECT
             COUNT(*) AS total_conversations,
             SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_count,
             AVG(COALESCE(duration_ms, 0)) AS avg_duration_ms,
@@ -68,8 +105,8 @@ def get_template_stats(
             SUM(CASE WHEN finish_reason = 'length' THEN 1 ELSE 0 END) AS truncated_count,
             AVG(rating) AS avg_rating,
             COUNT(rating) AS rated_count
-        FROM conversations WHERE template_id = ?""",
-        (template_id,),
+        FROM conversations WHERE template_id = ? {extra_where}""",
+        [template_id] + key_params,
     ).fetchone()
     if not row or row["total_conversations"] == 0:
         raise HTTPException(status_code=404, detail="No conversations for template")
@@ -118,20 +155,24 @@ def list_template_conversations(
     page: int = 1,
     page_size: int = 20,
     db: sqlite3.Connection = Depends(get_analytics_db),
+    auth: AuthContext = Depends(resolve_auth),
 ) -> dict:
     """List conversations using a specific prompt template."""
+    key_where, key_params = auth.where_clause()
+    extra_where = f"AND {key_where}" if key_where else ""
     count = db.execute(
-        "SELECT COUNT(*) FROM conversations WHERE template_id = ?", (template_id,)
+        f"SELECT COUNT(*) FROM conversations WHERE template_id = ? {extra_where}",
+        [template_id] + key_params,
     ).fetchone()[0]
     offset = (page - 1) * page_size
     rows = db.execute(
-        """SELECT id, timestamp, model, status, duration_ms,
+        f"""SELECT id, timestamp, model, status, duration_ms,
                   total_tokens, cost_usd, finish_reason, rating,
                   substr(coalesce(user_prompt, ''), 1, 120) AS user_prompt_preview,
                   substr(coalesce(assistant_response, ''), 1, 120) AS assistant_response_preview
-           FROM conversations WHERE template_id = ?
+           FROM conversations WHERE template_id = ? {extra_where}
            ORDER BY timestamp DESC LIMIT ? OFFSET ?""",
-        (template_id, page_size, offset),
+        [template_id] + key_params + [page_size, offset],
     ).fetchall()
     return {
         "total": count,
@@ -146,18 +187,21 @@ def get_template_daily(
     template_id: str,
     days: int = 30,
     db: sqlite3.Connection = Depends(get_analytics_db),
+    auth: AuthContext = Depends(resolve_auth),
 ) -> list[dict]:
     """Return daily usage trend for a specific template."""
+    key_where, key_params = auth.where_clause()
+    extra_where = f"AND {key_where}" if key_where else ""
     rows = db.execute(
-        """SELECT date(timestamp) AS date,
+        f"""SELECT date(timestamp) AS date,
                   COUNT(*) AS requests,
                   SUM(COALESCE(cost_usd, 0)) AS cost_usd,
                   AVG(COALESCE(duration_ms, 0)) AS avg_duration_ms
            FROM conversations
-           WHERE template_id = ? AND timestamp >= date('now', ?)
+           WHERE template_id = ? AND timestamp >= date('now', ?) {extra_where}
            GROUP BY date(timestamp)
            ORDER BY date ASC""",
-        (template_id, f"-{days} days"),
+        [template_id, f"-{days} days"] + key_params,
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -167,8 +211,12 @@ def compare_templates(
     template_a: str,
     template_b: str,
     db: sqlite3.Connection = Depends(get_analytics_db),
+    auth: AuthContext = Depends(resolve_auth),
 ) -> dict:
     """Compare two prompt templates side-by-side."""
+    key_where, key_params = auth.where_clause()
+    extra_where = f"AND {key_where}" if key_where else ""
+
     def _stats(tid: str) -> dict:
         tmpl = db.execute(
             "SELECT * FROM prompt_templates WHERE template_id = ?", (tid,)
@@ -176,15 +224,15 @@ def compare_templates(
         if not tmpl:
             raise HTTPException(status_code=404, detail=f"Template {tid} not found")
         agg = db.execute(
-            """SELECT COUNT(*) AS total,
+            f"""SELECT COUNT(*) AS total,
                   SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success,
                   AVG(COALESCE(duration_ms, 0)) AS avg_ms,
                   AVG(COALESCE(cost_usd, 0)) AS avg_cost,
                   SUM(COALESCE(cost_usd, 0)) AS total_cost,
                   AVG(COALESCE(total_tokens, 0)) AS avg_tokens,
                   AVG(rating) AS avg_rating
-            FROM conversations WHERE template_id = ?""",
-            (tid,),
+            FROM conversations WHERE template_id = ? {extra_where}""",
+            [tid] + key_params,
         ).fetchone()
         total = agg["total"] or 0
         return {
@@ -207,6 +255,7 @@ def compare_templates(
 def find_similar_templates(
     template_id: str,
     db: sqlite3.Connection = Depends(get_analytics_db),
+    auth: AuthContext = Depends(resolve_auth),
 ) -> list[dict]:
     """Find templates with similar system prompts using token overlap."""
     source = db.execute(

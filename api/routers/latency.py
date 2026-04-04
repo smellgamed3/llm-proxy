@@ -4,7 +4,7 @@ import sqlite3
 
 from fastapi import APIRouter, Depends
 
-from api.dependencies import get_analytics_db
+from api.dependencies import get_analytics_db, resolve_auth, AuthContext
 
 router = APIRouter(tags=["latency"])
 
@@ -15,10 +15,15 @@ def get_latency_summary(
     date_from: str | None = None,
     date_to: str | None = None,
     db: sqlite3.Connection = Depends(get_analytics_db),
+    auth: AuthContext = Depends(resolve_auth),
 ) -> dict:
     """Return latency percentiles (p50, p95, p99)."""
     where = []
     params = []
+    key_where, key_params = auth.where_clause()
+    if key_where:
+        where.append(key_where)
+        params.extend(key_params)
     if model:
         where.append("model = ?")
         params.append(model)
@@ -57,14 +62,18 @@ def get_latency_summary(
 @router.get("/latency/by-model")
 def get_latency_by_model(
     db: sqlite3.Connection = Depends(get_analytics_db),
+    auth: AuthContext = Depends(resolve_auth),
 ) -> list[dict]:
     """Return avg latency per model."""
+    key_where, key_params = auth.where_clause()
+    extra_where = f"AND {key_where}" if key_where else ""
     rows = db.execute(
-        """SELECT model, AVG(duration_ms) AS avg_ms, COUNT(*) AS count
+        f"""SELECT model, AVG(duration_ms) AS avg_ms, COUNT(*) AS count
            FROM conversations
-           WHERE duration_ms IS NOT NULL
+           WHERE duration_ms IS NOT NULL {extra_where}
            GROUP BY model
            ORDER BY avg_ms DESC""",
+        key_params,
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -73,17 +82,32 @@ def get_latency_by_model(
 def get_daily_latency(
     days: int = 30,
     db: sqlite3.Connection = Depends(get_analytics_db),
+    auth: AuthContext = Depends(resolve_auth),
 ) -> list[dict]:
     """Return daily average latency trend."""
-    rows = db.execute(
-        """SELECT date, AVG(avg_duration_ms) AS avg_ms,
-                  SUM(request_count) AS requests
-           FROM daily_stats
-           WHERE date >= date('now', ?)
-           GROUP BY date
-           ORDER BY date ASC""",
-        (f"-{days} days",),
-    ).fetchall()
+    key_where, key_params = auth.where_clause()
+    if auth.is_admin:
+        rows = db.execute(
+            """SELECT date, AVG(avg_duration_ms) AS avg_ms,
+                      SUM(request_count) AS requests
+               FROM daily_stats
+               WHERE date >= date('now', ?)
+               GROUP BY date
+               ORDER BY date ASC""",
+            (f"-{days} days",),
+        ).fetchall()
+    else:
+        extra_where = f"AND {key_where}" if key_where else ""
+        rows = db.execute(
+            f"""SELECT date(timestamp) AS date,
+                       AVG(COALESCE(duration_ms, 0)) AS avg_ms,
+                       COUNT(*) AS requests
+                FROM conversations
+                WHERE timestamp >= date('now', ?) {extra_where}
+                GROUP BY date(timestamp)
+                ORDER BY date ASC""",
+            [f"-{days} days"] + key_params,
+        ).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -91,10 +115,15 @@ def get_daily_latency(
 def get_latency_distribution(
     model: str | None = None,
     db: sqlite3.Connection = Depends(get_analytics_db),
+    auth: AuthContext = Depends(resolve_auth),
 ) -> list[dict]:
     """Return latency distribution in buckets for histogram."""
     where = ["duration_ms IS NOT NULL"]
     params: list = []
+    key_where, key_params = auth.where_clause()
+    if key_where:
+        where.append(key_where)
+        params.extend(key_params)
     if model:
         where.append("model = ?")
         params.append(model)
