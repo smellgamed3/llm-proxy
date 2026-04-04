@@ -5,6 +5,16 @@ set -euo pipefail
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.dev.yml}"
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+load_env_file() {
+  local env_file="$PROJECT_DIR/.env"
+  if [[ -f "$env_file" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$env_file"
+    set +a
+  fi
+}
+
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
     echo "Missing required command: $1" >&2
@@ -13,6 +23,7 @@ require_cmd() {
 }
 
 require_cmd docker
+load_env_file
 
 run_compose() {
   (cd "$PROJECT_DIR" && docker compose -f "$COMPOSE_FILE" "$@")

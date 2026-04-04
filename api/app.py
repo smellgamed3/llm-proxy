@@ -10,7 +10,7 @@ from .dependencies import verify_api_key
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="LLM Proxy Analytics API", version="0.2.1")
+    app = FastAPI(title="LLM Proxy Analytics API", version="0.2.4")
     app.state.analyzer_sync_manager = admin.AnalyzerSyncManager()
 
     api_deps = [Depends(verify_api_key)]

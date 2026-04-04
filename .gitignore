@@ -9,6 +9,9 @@ wheels/
 # Virtual environments
 .venv/
 
+# Local environment
+.env
+
 # Test/coverage
 .pytest_cache/
 .coverage

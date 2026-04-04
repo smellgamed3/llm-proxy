@@ -4,7 +4,7 @@
 
 提供提示词提取、Token 用量统计、成本计算、延迟分析、成功/失败分类等能力，并通过 RESTful API 和 Dashboard 对外提供查询服务。
 
-当前版本：`0.2.3`
+当前版本：`0.2.4`
 
 ## Dashboard 能力概览
 
@@ -51,8 +51,11 @@
 ### Docker Compose（推荐）
 
 ```bash
-# 设置上游地址
-export UPSTREAM_URL=http://your-llm-service:8080
+# 复制环境变量模板
+cp .env.example .env
+
+# 编辑 .env，至少设置上游地址
+# UPSTREAM_URL=http://your-llm-service:8080
 
 # 启动全部服务（代理 + 分析 + API）
 docker compose up -d
@@ -60,6 +63,8 @@ docker compose up -d
 # 查看日志
 docker compose logs -f
 ```
+
+`docker compose` 会自动读取项目根目录的 `.env`。常用变量包括 `UPSTREAM_URL`、`PROXY_PORT`、`API_PORT`、`LOG_LEVEL`、`ANALYZER_INTERVAL`、`ANALYZER_BATCH_SIZE` 和 `TRAEFIK_HOST`。
 
 服务启动后：
 
