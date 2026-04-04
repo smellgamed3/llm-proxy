@@ -2243,16 +2243,16 @@ h2 {
 }
 
 .key-manager-popover {
-  position: absolute;
-  right: 0;
-  top: calc(100% + 0.55rem);
+  position: fixed;
+  right: 1.25rem;
+  top: 53px;
   width: min(640px, calc(100vw - 2rem));
   background: #ffffff;
   border: 1px solid #dbe6f3;
   border-radius: 16px;
   box-shadow: 0 18px 50px rgba(15, 23, 42, 0.18);
   padding: 1rem;
-  z-index: 120;
+  z-index: 200;
 }
 
 .key-manager-toolbar {
@@ -2657,6 +2657,109 @@ html[data-theme='dark'] .progress-track {
 html[data-theme='dark'] .modal-overlay {
   background: rgba(2, 6, 23, 0.72);
 }
+
+/* ── Conversation detail modal — dark theme ───────────────────── */
+html[data-theme='dark'] .modal-dialog {
+  background: #0f1e31;
+  color: #e2e8f0;
+  box-shadow: 0 20px 60px rgba(0, 5, 15, 0.7);
+}
+
+html[data-theme='dark'] .modal-header {
+  border-bottom-color: rgba(148, 163, 184, 0.14);
+  color: #e5eefb;
+}
+
+html[data-theme='dark'] .modal-close {
+  color: #94a3b8;
+}
+
+html[data-theme='dark'] .modal-close:hover {
+  background: #132238;
+  color: #f1f5f9;
+}
+
+html[data-theme='dark'] .modal-body {
+  background: #0f1e31;
+  color: #d4e2f4;
+}
+
+html[data-theme='dark'] .collapsible-section {
+  border-color: rgba(148, 163, 184, 0.14);
+  background: #0f1e31;
+}
+
+html[data-theme='dark'] .collapsible-section:hover {
+  border-color: rgba(99, 117, 221, 0.4);
+}
+
+html[data-theme='dark'] .collapsible-section[open] {
+  border-color: rgba(99, 117, 221, 0.55);
+}
+
+html[data-theme='dark'] .section-summary {
+  color: #cbd5e1;
+}
+
+html[data-theme='dark'] .section-summary:hover {
+  background: #122035;
+}
+
+html[data-theme='dark'] .section-content pre {
+  background: #0a192c;
+  border-color: rgba(148, 163, 184, 0.14);
+  color: #cbd5e1;
+}
+
+html[data-theme='dark'] .section-badge {
+  background: #1e3252;
+  color: #93c5fd;
+}
+
+html[data-theme='dark'] .section-content .section-copy-btn {
+  background: #132238;
+  border-color: rgba(148, 163, 184, 0.2);
+  color: #94a3b8;
+}
+
+html[data-theme='dark'] .section-content .section-copy-btn:hover {
+  background: #1e3252;
+  color: #e2e8f0;
+}
+
+html[data-theme='dark'] .detail-meta {
+  border-color: rgba(148, 163, 184, 0.14);
+}
+
+html[data-theme='dark'] .detail-inline-row .rating-star {
+  color: #475569;
+}
+
+html[data-theme='dark'] .detail-inline-row .rating-star.active {
+  color: #f59e0b;
+}
+
+html[data-theme='dark'] .tag-badge {
+  background: #1e3252;
+  color: #93c5fd;
+  border-color: rgba(99, 130, 246, 0.25);
+}
+
+html[data-theme='dark'] .tag-input {
+  background: #132238;
+  border-color: rgba(148, 163, 184, 0.2);
+  color: #e2e8f0;
+}
+
+html[data-theme='dark'] .section-icon-system { background: #2d1f07; color: #fbbf24; }
+html[data-theme='dark'] .section-icon-tools  { background: #1e1533; color: #c4b5fd; }
+html[data-theme='dark'] .section-icon-skills { background: #0a2540; color: #38bdf8; }
+html[data-theme='dark'] .section-icon-history { background: #0e233d; color: #93c5fd; }
+html[data-theme='dark'] .section-icon-user   { background: #062a1e; color: #34d399; }
+html[data-theme='dark'] .section-icon-assistant { background: #1e1335; color: #e879f9; }
+html[data-theme='dark'] .section-icon-perf   { background: #1a2e10; color: #86efac; }
+html[data-theme='dark'] .section-icon-content { background: #1a1a10; color: #fde68a; }
+html[data-theme='dark'] .section-icon-config { background: #0e2030; color: #7dd3fc; }
 
 @media (max-width: 960px) {
   .header-actions {
