@@ -10,7 +10,7 @@ from .dependencies import resolve_auth
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="LLM Proxy Analytics API", version="0.2.5")
+    app = FastAPI(title="LLM Proxy Analytics API", version="1.0.0")
     app.state.analyzer_sync_manager = admin.AnalyzerSyncManager()
 
     api_deps = [Depends(resolve_auth)]
