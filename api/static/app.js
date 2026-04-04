@@ -1061,6 +1061,7 @@ async function showConversationDetail(conversationId) {
       resolvedAssistant,
       reqMessages,
       tools: fallbackTools,
+      fullToolDefs,
     });
 
     // Raw data
@@ -1631,7 +1632,7 @@ function renderTokenBreakdown(info) {
     cacheReadTokens, cacheCreationTokens, reasoningTokens,
     reqBodySize, resBodySize,
     resolvedSystemPrompt, resolvedUserPrompt, resolvedAssistant,
-    reqMessages, tools,
+    reqMessages, tools, fullToolDefs,
   } = info;
   const promptTokens = Number(pt || 0);
   const completionTokens = Number(ct || 0);
@@ -1792,6 +1793,78 @@ function renderTokenBreakdown(info) {
     html += `</div>`;
 
     chart2El.innerHTML = html;
+  }
+
+  // === Chart 3: Skill call distribution ===
+  const SKILL_COLORS = {
+    'file-read':  '#3b82f6',
+    'file-write': '#f59e0b',
+    'search':     '#8b5cf6',
+    'terminal':   '#ef4444',
+    'browser':    '#14b8a6',
+    'git':        '#10b981',
+    'analysis':   '#a855f7',
+    'other':      '#94a3b8',
+  };
+  const chart3El = document.getElementById('breakdown-chart-skills');
+  if (chart3El) {
+    const toolDefsArr = fullToolDefs || [];
+    const hasToolCalls = Array.isArray(reqMessages) && reqMessages.some(m => m && m.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length > 0);
+    if (toolDefsArr.length > 0 || hasToolCalls) {
+      const skillStats = analyzeSkillUsage(toolDefsArr, reqMessages || []);
+      if (skillStats.totalDefined > 0 || skillStats.totalCalls > 0) {
+        // Build per-category call counts
+        const catCallMap = {};
+        Object.entries(skillStats.callMap).forEach(([name, count]) => {
+          const cat = categorizeToolName(name);
+          catCallMap[cat] = (catCallMap[cat] || 0) + count;
+        });
+
+        const segments = Object.entries(catCallMap)
+          .sort((a, b) => b[1] - a[1])
+          .map(([cat, count]) => {
+            const catInfo = SKILL_CATEGORIES.find(c => c.key === cat) || SKILL_CATEGORIES[SKILL_CATEGORIES.length - 1];
+            return { key: cat, label: catInfo.icon + '\u00a0' + catInfo.label, count, color: SKILL_COLORS[cat] || '#94a3b8' };
+          });
+
+        const totalCalls = segments.reduce((s, seg) => s + seg.count, 0);
+        const usageRate = skillStats.totalDefined > 0
+          ? ((skillStats.uniqueCalled / skillStats.totalDefined) * 100).toFixed(0) + '%'
+          : '—';
+
+        let html3 = `<div class="breakdown-label">Skill 调用分布 <span style="font-weight:400;color:#6b7280;font-size:0.75rem;">${fmt(skillStats.totalCalls)} 次调用 · ${skillStats.totalDefined} 个工具定义 · 使用率 ${usageRate}</span></div>`;
+
+        if (segments.length > 0 && totalCalls > 0) {
+          html3 += `<div class="composition-bar">`;
+          segments.forEach(seg => {
+            const pct = Math.max(1.5, (seg.count / totalCalls) * 100);
+            html3 += `<div class="composition-seg" style="width:${pct}%;background:${seg.color}" title="${seg.label}: ${seg.count} 次 (${((seg.count / totalCalls) * 100).toFixed(1)}%)"></div>`;
+          });
+          html3 += `</div>`;
+
+          html3 += `<div class="composition-details">`;
+          segments.forEach(seg => {
+            const pct = ((seg.count / totalCalls) * 100).toFixed(1);
+            html3 += `<div class="composition-row">
+              <span class="legend-dot" style="background:${seg.color}"></span>
+              <span class="composition-name">${seg.label}</span>
+              <span class="composition-value">${seg.count} 次</span>
+              <span class="composition-pct">${pct}%</span>
+              <div class="composition-minibar"><div style="width:${pct}%;height:100%;background:${seg.color};border-radius:3px;"></div></div>
+            </div>`;
+          });
+          html3 += `</div>`;
+        } else if (skillStats.totalDefined > 0) {
+          html3 += `<div class="breakdown-empty">无工具调用记录</div>`;
+        }
+
+        chart3El.innerHTML = html3;
+      } else {
+        chart3El.innerHTML = '';
+      }
+    } else {
+      chart3El.innerHTML = '';
+    }
   }
 }
 
