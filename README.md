@@ -4,13 +4,14 @@
 
 提供提示词提取、Token 用量统计、成本计算、延迟分析、成功/失败分类等能力，并通过 RESTful API 和 Dashboard 对外提供查询服务。
 
-当前版本：`1.1.0`
+当前版本：`1.2.0`
 
 ## 质量基线
 
 - 统一日志配置：`proxy`、`analyzer`、`api` 均支持 `LOG_FORMAT=json`
 - API 默认启用基础限流，避免 dashboard / query endpoint 被瞬时打爆
 - Dashboard 公共壳层统一收敛到 `api/static/app.js`，减少多页面重复模板
+- Dashboard key/hash 管理支持多 key 激活、别名二次编辑与亮暗主题切换
 - CI 已覆盖多 Python 版本测试与镜像构建发布
 
 ## Dashboard 能力概览

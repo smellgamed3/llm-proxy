@@ -1,7 +1,7 @@
 // LLM Proxy Analytics Dashboard — app.js
 
 const API = '/api';
-const APP_VERSION = 'v1.1.0';
+const APP_VERSION = 'v1.2.0';
 
 const NAV_GROUPS = [
   {
@@ -95,7 +95,10 @@ function renderAppShell() {
         <span class="brand">LLM Proxy Analytics</span>
         <span class="header-version">${APP_VERSION}</span>
       </div>
-      <div id="key-manager" class="key-manager"></div>
+      <div class="header-actions">
+        <button id="theme-toggle" class="theme-toggle" type="button" onclick="toggleTheme()"></button>
+        <div id="key-manager" class="key-manager"></div>
+      </div>
     </header>
     <aside class="app-sidebar">
       <nav class="sidebar-nav">${navMarkup}</nav>
@@ -107,31 +110,117 @@ function renderAppShell() {
 // ── API Key Hash Management ───────────────────────────────────────────────
 
 const KEY_STORAGE_KEY = 'llm_proxy_key_hashes';
+const THEME_STORAGE_KEY = 'llm_proxy_theme';
+
+let keyManagerExpanded = false;
+
+function formatHashPreview(hash) {
+  if (!hash) return '—';
+  return `${hash.slice(0, 8)}…${hash.slice(-4)}`;
+}
+
+function defaultKeyLabel(hash) {
+  return formatHashPreview(hash);
+}
+
+function normalizeKeyRecord(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+  const hash = typeof entry.hash === 'string' ? entry.hash.trim().toLowerCase() : '';
+  if (!/^[0-9a-f]{32}$/i.test(hash)) return null;
+  const label = typeof entry.label === 'string' && entry.label.trim()
+    ? entry.label.trim()
+    : defaultKeyLabel(hash);
+  return {
+    hash,
+    label,
+    addedAt: typeof entry.addedAt === 'string' && entry.addedAt ? entry.addedAt : new Date().toISOString(),
+    active: entry.active !== false,
+  };
+}
+
+function normalizeKeyRecords(entries) {
+  if (!Array.isArray(entries)) return [];
+  const deduped = new Map();
+  entries.forEach((entry) => {
+    const normalized = normalizeKeyRecord(entry);
+    if (!normalized) return;
+    deduped.set(normalized.hash, normalized);
+  });
+  return Array.from(deduped.values());
+}
 
 function getStoredKeyHashes() {
   try {
     const raw = localStorage.getItem(KEY_STORAGE_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    const normalized = normalizeKeyRecords(parsed);
+    if (JSON.stringify(parsed) !== JSON.stringify(normalized)) {
+      localStorage.setItem(KEY_STORAGE_KEY, JSON.stringify(normalized));
+    }
+    return normalized;
   } catch { return []; }
 }
 
 function saveKeyHashes(hashes) {
-  localStorage.setItem(KEY_STORAGE_KEY, JSON.stringify(hashes));
+  const normalized = normalizeKeyRecords(hashes);
+  localStorage.setItem(KEY_STORAGE_KEY, JSON.stringify(normalized));
+  return normalized;
 }
 
-function addKeyHash(hash, label) {
+function upsertKeyHash(hash, label) {
   const hashes = getStoredKeyHashes();
-  if (hashes.some(h => h.hash === hash)) return false;
-  hashes.push({ hash, label: label || hash.slice(0, 8) + '…', addedAt: new Date().toISOString() });
+  const normalizedHash = hash.trim().toLowerCase();
+  const normalizedLabel = label && label.trim() ? label.trim() : defaultKeyLabel(normalizedHash);
+  const existing = hashes.find((item) => item.hash === normalizedHash);
+  if (existing) {
+    existing.label = normalizedLabel || existing.label;
+    existing.active = true;
+    saveKeyHashes(hashes);
+    return { status: 'updated', entry: existing };
+  }
+  const entry = {
+    hash: normalizedHash,
+    label: normalizedLabel,
+    addedAt: new Date().toISOString(),
+    active: true,
+  };
+  hashes.push(entry);
+  saveKeyHashes(hashes);
+  return { status: 'added', entry };
+}
+
+function updateKeyLabel(hash, label) {
+  const hashes = getStoredKeyHashes();
+  const entry = hashes.find((item) => item.hash === hash);
+  if (!entry) return false;
+  entry.label = label && label.trim() ? label.trim() : defaultKeyLabel(hash);
   saveKeyHashes(hashes);
   return true;
+}
+
+function setKeyHashActive(hash, active) {
+  const hashes = getStoredKeyHashes();
+  const entry = hashes.find((item) => item.hash === hash);
+  if (!entry) return false;
+  entry.active = Boolean(active);
+  saveKeyHashes(hashes);
+  return true;
+}
+
+function setAllKeyHashesActive(active) {
+  const hashes = getStoredKeyHashes().map((item) => ({ ...item, active: Boolean(active) }));
+  saveKeyHashes(hashes);
+  return hashes;
 }
 
 function removeKeyHash(hash) {
   const hashes = getStoredKeyHashes().filter(h => h.hash !== hash);
   saveKeyHashes(hashes);
+}
+
+function hasStoredKeyHashes() {
+  return getStoredKeyHashes().length > 0;
 }
 
 async function computeKeyHash(apiKey) {
@@ -242,7 +331,9 @@ function add32(...values) {
 }
 
 function getActiveKeyHashes() {
-  return getStoredKeyHashes().map(h => h.hash);
+  return getStoredKeyHashes()
+    .filter((item) => item.active)
+    .map((item) => item.hash);
 }
 
 function buildAuthQuery() {
@@ -257,6 +348,36 @@ function appendAuthToUrl(url) {
   const separator = url.includes('?') ? '&' : '?';
   return url + separator + authQuery;
 }
+
+function getPreferredTheme() {
+  const storedTheme = localStorage.getItem(THEME_STORAGE_KEY);
+  if (storedTheme === 'light' || storedTheme === 'dark') return storedTheme;
+  return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+
+function syncThemeToggle() {
+  const button = document.getElementById('theme-toggle');
+  if (!button) return;
+  const theme = document.documentElement.dataset.theme || 'light';
+  button.textContent = theme === 'dark' ? '切到亮色' : '切到暗色';
+  button.setAttribute('aria-label', theme === 'dark' ? '切换到亮色主题' : '切换到暗色主题');
+}
+
+function applyTheme(theme, { persist = true } = {}) {
+  const resolvedTheme = theme === 'dark' ? 'dark' : 'light';
+  document.documentElement.dataset.theme = resolvedTheme;
+  if (persist) {
+    localStorage.setItem(THEME_STORAGE_KEY, resolvedTheme);
+  }
+  syncThemeToggle();
+}
+
+function toggleTheme() {
+  const currentTheme = document.documentElement.dataset.theme || getPreferredTheme();
+  applyTheme(currentTheme === 'dark' ? 'light' : 'dark');
+}
+
+applyTheme(getPreferredTheme(), { persist: false });
 
 // ── Toast notification system ─────────────────────────────────────────────
 
@@ -287,6 +408,9 @@ function showToast(message, type = 'info', duration = 4000) {
 }
 
 async function requestJSON(url, options = {}) {
+  if (hasStoredKeyHashes() && getActiveKeyHashes().length === 0) {
+    throw Object.assign(new Error('No active key hashes selected'), { status: 401 });
+  }
   const authedUrl = appendAuthToUrl(url);
   const headers = { ...(options.headers || {}) };
   if (options.body != null && !headers['Content-Type']) {
@@ -294,7 +418,13 @@ async function requestJSON(url, options = {}) {
   }
   const r = await fetch(authedUrl, { ...options, headers });
   if (r.status === 401) {
-    showKeyModal('请添加 API Key 以访问数据');
+    if (hasStoredKeyHashes()) {
+      keyManagerExpanded = true;
+      renderKeyManager();
+      showToast('请先激活至少一个 hash', 'warning');
+    } else {
+      showKeyModal('请添加 API Key 以访问数据');
+    }
     throw new Error('Unauthorized — no key hashes');
   }
   if (!r.ok) {
@@ -3128,29 +3258,116 @@ function initModelsTimeRange() {
 
 // ── Key Management UI ─────────────────────────────────────────────────────
 
+function getCurrentPageLoader() {
+  const path = window.location.pathname;
+  if (path === '/' || path.endsWith('index.html')) return () => loadOverview();
+  if (path.endsWith('analyzer.html')) return () => loadAnalyzerPage();
+  if (path.endsWith('costs.html')) return () => loadCostsPage();
+  if (path.endsWith('latency.html')) return () => loadLatencyPage();
+  if (path.endsWith('models.html')) return () => loadModelsPage();
+  if (path.endsWith('prompts.html')) return () => loadPromptsPage();
+  if (path.endsWith('errors.html')) return () => loadErrorsPage();
+  if (path.endsWith('conversations.html')) {
+    return () => {
+      selectedConversationId = null;
+      currentPage = 1;
+      const detail = document.getElementById('conv-detail');
+      if (detail) detail.hidden = true;
+      return loadConversations(1);
+    };
+  }
+  return null;
+}
+
+async function refreshCurrentPageData() {
+  const loader = getCurrentPageLoader();
+  if (!loader || getActiveKeyHashes().length === 0) return;
+  await loader();
+}
+
+function reloadPageToEmptyState() {
+  window.location.reload();
+}
+
+function setKeyManagerExpanded(expanded) {
+  keyManagerExpanded = Boolean(expanded);
+  renderKeyManager();
+}
+
+function buildKeyManagerSummary(hashes) {
+  const activeCount = hashes.filter((item) => item.active).length;
+  if (hashes.length === 0) return '未添加 Key';
+  if (activeCount === 0) return `已保存 ${hashes.length} 个，未激活`;
+  return `已激活 ${activeCount} / ${hashes.length}`;
+}
+
 function renderKeyManager() {
   const container = document.getElementById('key-manager');
   if (!container) return;
   const hashes = getStoredKeyHashes();
 
-  let html = '';
   if (hashes.length === 0) {
-    html = `<button class="key-add-btn" onclick="showKeyModal()">+ Add API Key</button>`;
-  } else {
-    html = `<div class="key-chips">`;
-    for (const h of hashes) {
-      html += `<span class="key-chip" title="${escapeHtml(h.hash)}">
-        <span class="key-chip-label">${escapeHtml(h.label)}</span>
-        <button class="key-chip-copy" onclick="copyHash('${escapeHtml(h.hash)}')" title="Copy hash">⧉</button>
-        <button class="key-chip-remove" onclick="removeKey('${escapeHtml(h.hash)}')" title="Remove">×</button>
-      </span>`;
-    }
-    html += `<button class="key-add-btn key-add-btn-small" onclick="showKeyModal()">+</button></div>`;
+    container.innerHTML = `
+      <button class="key-manager-trigger empty" type="button" onclick="showKeyModal('首次使用请添加 API Key')">
+        <span class="key-manager-title">添加 API Key</span>
+      </button>`;
+    return;
   }
-  container.innerHTML = html;
+
+  const summary = buildKeyManagerSummary(hashes);
+  const adminHint = hashes.some((item) => item.active)
+    ? '<div class="key-manager-note">当前页面仅显示激活 hash 的数据；若激活组合含 admin hash，则自动按 admin 规则显示全量数据。</div>'
+    : '<div class="key-manager-note warning">当前没有激活的 hash，请先启用至少一个。</div>';
+
+  container.innerHTML = `
+    <div class="key-manager-shell${keyManagerExpanded ? ' open' : ''}">
+      <button class="key-manager-trigger" type="button" onclick="setKeyManagerExpanded(${keyManagerExpanded ? 'false' : 'true'})" aria-expanded="${keyManagerExpanded ? 'true' : 'false'}">
+        <span class="key-manager-title">Key 管理</span>
+        <span class="key-manager-summary">${escapeHtml(summary)}</span>
+      </button>
+      <div class="key-manager-popover" ${keyManagerExpanded ? '' : 'hidden'}>
+        <div class="key-manager-toolbar">
+          <div>
+            <div class="key-manager-heading">本地已保存 ${hashes.length} 个 hash</div>
+            ${adminHint}
+          </div>
+          <div class="key-manager-toolbar-actions">
+            <button type="button" class="key-toolbar-btn" onclick="setAllKeysActive(true)">全部激活</button>
+            <button type="button" class="key-toolbar-btn" onclick="setAllKeysActive(false)">全部停用</button>
+            <button type="button" class="key-toolbar-btn primary" onclick="showKeyModal()">新增</button>
+          </div>
+        </div>
+        <div class="key-manager-list">
+          ${hashes.map((item) => `
+            <div class="key-item${item.active ? ' active' : ''}">
+              <label class="key-item-toggle">
+                <input type="checkbox" ${item.active ? 'checked' : ''} onchange="toggleKeyActive('${item.hash}', this.checked)" />
+                <span>${item.active ? '已激活' : '未激活'}</span>
+              </label>
+              <div class="key-item-body">
+                <div class="key-item-label-row">
+                  <span class="key-item-label">${escapeHtml(item.label || defaultKeyLabel(item.hash))}</span>
+                  <span class="key-item-hash">${escapeHtml(formatHashPreview(item.hash))}</span>
+                </div>
+                <div class="key-item-meta" title="${escapeHtml(item.hash)}">${escapeHtml(item.hash)}</div>
+              </div>
+              <div class="key-item-actions">
+                <button type="button" class="key-item-btn" onclick="showEditKeyModal('${item.hash}')">别名</button>
+                <button type="button" class="key-item-btn" onclick="copyHash('${item.hash}')">复制</button>
+                <button type="button" class="key-item-btn danger" onclick="removeKey('${item.hash}')">删除</button>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    </div>`;
 }
 
-function showKeyModal(message) {
+function showKeyModal(message = '', options = {}) {
+  const mode = options.mode === 'edit' ? 'edit' : 'add';
+  const existing = mode === 'edit'
+    ? getStoredKeyHashes().find((item) => item.hash === options.hash)
+    : null;
   let modal = document.getElementById('key-modal');
   if (modal) modal.remove();
 
@@ -3159,23 +3376,36 @@ function showKeyModal(message) {
   modal.className = 'modal-overlay';
   modal.innerHTML = `
     <div class="modal-box key-modal-box">
-      <h3>添加 API Key</h3>
+      <h3>${mode === 'edit' ? '修改别名' : '添加 API Key / Hash'}</h3>
       ${message ? `<p class="key-modal-msg">${escapeHtml(message)}</p>` : ''}
-      <p class="key-modal-hint">输入您的 LLM API Key，系统会在浏览器中计算 SHA-256 哈希值。<br>原始 Key 不会被发送或存储。</p>
-      <input type="password" id="key-modal-input" class="key-modal-input" placeholder="sk-..." autocomplete="off" />
-      <input type="text" id="key-modal-label" class="key-modal-input" placeholder="标签 (可选, 如 'Production Key')" />
-      <div class="key-modal-or">── 或直接输入 Hash ──</div>
-      <input type="text" id="key-modal-hash-input" class="key-modal-input" placeholder="已知的 32 位 hex hash" maxlength="32" />
+      ${mode === 'edit' ? `
+        <p class="key-modal-hint">原始 API Key 不会显示，当前只管理 hash 的展示别名。</p>
+        <div class="key-modal-readonly">
+          <span>Hash</span>
+          <strong>${escapeHtml(existing ? existing.hash : options.hash || '')}</strong>
+        </div>
+      ` : `
+        <p class="key-modal-hint">输入您的 LLM API Key，系统会在浏览器中计算 SHA-256 hash。<br>原始 Key 不会被发送或存储，添加完成后页面仅显示 hash。</p>
+        <input type="password" id="key-modal-input" class="key-modal-input" placeholder="sk-..." autocomplete="off" />
+        <div class="key-modal-or">── 或直接输入 Hash ──</div>
+        <input type="text" id="key-modal-hash-input" class="key-modal-input" placeholder="已知的 32 位 hex hash" maxlength="32" />
+      `}
+      <input type="text" id="key-modal-label" class="key-modal-input" placeholder="别名（可选，如 Production）" value="${escapeHtml(existing ? existing.label : '')}" />
       <div class="key-modal-actions">
         <button class="btn" onclick="closeKeyModal()">取消</button>
-        <button class="btn btn-primary" onclick="submitKey()">添加</button>
+        <button class="btn btn-primary" onclick="${mode === 'edit' ? `submitKeyLabel('${options.hash || ''}')` : 'submitKey()'}">${mode === 'edit' ? '保存' : '添加'}</button>
       </div>
     </div>`;
   document.body.appendChild(modal);
   modal.addEventListener('click', (e) => {
     if (e.target === modal) closeKeyModal();
   });
-  document.getElementById('key-modal-input').focus();
+  const focusTarget = document.getElementById(mode === 'edit' ? 'key-modal-label' : 'key-modal-input');
+  if (focusTarget) focusTarget.focus();
+}
+
+function showEditKeyModal(hash) {
+  showKeyModal('', { mode: 'edit', hash });
 }
 
 function closeKeyModal() {
@@ -3189,7 +3419,7 @@ async function submitKey() {
   const hashInput = document.getElementById('key-modal-hash-input');
 
   const rawKey = (apiKeyInput.value || '').trim();
-  const directHash = (hashInput.value || '').trim();
+  const directHash = hashInput ? (hashInput.value || '').trim() : '';
   const label = (labelInput.value || '').trim();
 
   let hash = '';
@@ -3202,22 +3432,65 @@ async function submitKey() {
     return;
   }
 
-  const added = addKeyHash(hash, label || (rawKey ? rawKey.slice(0, 6) + '…' : hash.slice(0, 8) + '…'));
+  const result = upsertKeyHash(hash, label);
   closeKeyModal();
+  keyManagerExpanded = true;
   renderKeyManager();
-  if (added) {
-    showToast('Key 已添加 — hash: ' + hash, 'success');
-    location.reload();
+  if (result.status === 'added') {
+    showToast('已新增 hash: ' + formatHashPreview(hash), 'success');
   } else {
-    showToast('此 Key 已存在', 'info');
+    showToast('已更新现有 hash，并设为激活', 'info');
   }
+  await refreshCurrentPageData();
 }
 
-function removeKey(hash) {
+function submitKeyLabel(hash) {
+  const labelInput = document.getElementById('key-modal-label');
+  const label = (labelInput?.value || '').trim();
+  if (!updateKeyLabel(hash, label)) {
+    showToast('未找到要更新的 hash', 'error');
+    return;
+  }
+  closeKeyModal();
+  renderKeyManager();
+  showToast('别名已更新', 'success');
+}
+
+async function toggleKeyActive(hash, active) {
+  setKeyHashActive(hash, active);
+  keyManagerExpanded = true;
+  renderKeyManager();
+  if (getActiveKeyHashes().length === 0) {
+    showToast('当前没有激活的 hash，请先启用至少一个', 'warning');
+    reloadPageToEmptyState();
+    return;
+  }
+  await refreshCurrentPageData();
+}
+
+async function setAllKeysActive(active) {
+  setAllKeyHashesActive(active);
+  keyManagerExpanded = true;
+  renderKeyManager();
+  if (!active) {
+    showToast('已停用全部 hash', 'warning');
+    reloadPageToEmptyState();
+    return;
+  }
+  showToast('已激活全部 hash', 'success');
+  await refreshCurrentPageData();
+}
+
+async function removeKey(hash) {
   removeKeyHash(hash);
+  keyManagerExpanded = true;
   renderKeyManager();
   showToast('Key 已移除', 'info');
-  location.reload();
+  if (getActiveKeyHashes().length === 0) {
+    reloadPageToEmptyState();
+    return;
+  }
+  await refreshCurrentPageData();
 }
 
 async function copyHash(hash) {
@@ -3231,11 +3504,16 @@ async function copyHash(hash) {
 
 document.addEventListener('DOMContentLoaded', () => {
   renderAppShell();
+  syncThemeToggle();
 
   // Initialize key management UI
   renderKeyManager();
-  if (getActiveKeyHashes().length === 0) {
+  if (!hasStoredKeyHashes()) {
     showKeyModal('首次使用请添加 API Key');
+  } else if (getActiveKeyHashes().length === 0) {
+    keyManagerExpanded = true;
+    renderKeyManager();
+    showToast('当前没有激活的 hash，请先启用至少一个', 'warning');
   }
 
   const path = window.location.pathname;
@@ -3285,4 +3563,10 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     });
   }
+
+  document.addEventListener('click', (evt) => {
+    const manager = document.getElementById('key-manager');
+    if (!keyManagerExpanded || !manager || manager.contains(evt.target)) return;
+    setKeyManagerExpanded(false);
+  });
 });
