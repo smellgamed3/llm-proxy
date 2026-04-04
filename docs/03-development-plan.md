@@ -161,9 +161,10 @@ Phase 0 ──→ Phase 1 ──→ Phase 2 ──→ Phase 3 ──→ Phase 4
 | 单元测试 | 分页参数边界 | `tests/test_api/test_conversations.py` |
 | 单元测试 | 过滤条件组合 | `tests/test_api/test_conversations.py` |
 | 单元测试 | 空数据库场景 | `tests/test_api/test_overview.py` |
+| 单元测试 | 版本号对外一致性 | `tests/test_api/test_version_metadata.py` |
 | 集成测试 | API ↔ analytics.db 端到端 | `tests/test_api/test_integration.py` |
 | 集成测试 | 原始回溯：API → analytics → raw.db → body | `tests/test_api/test_conversations.py` |
-| 手动测试 | Dashboard 各页面功能验证 | 浏览器手动 |
+| 集成测试 | Dashboard 全页面浏览器验证（含 admin/scoped 鉴权） | `tests/test_dashboard/test_dashboard_agent_browser.py` |
 
 ### 5.3 验收标准
 
@@ -175,6 +176,7 @@ Phase 0 ──→ Phase 1 ──→ Phase 2 ──→ Phase 3 ──→ Phase 4
 - [ ] 原始数据回溯路径通畅
 - [ ] Dashboard Overview 页面正常展示指标和图表
 - [ ] Dashboard Conversations 页面可搜索、过滤、查看详情
+- [ ] Dashboard 其余页面（Costs/Latency/Models/Errors/Prompts/Analyzer）均可正常加载
 - [ ] Dashboard 无需任何构建工具，纯静态文件
 
 ---

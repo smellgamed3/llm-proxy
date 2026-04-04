@@ -10,12 +10,13 @@
 - `03` 关注全项目分阶段开发计划。
 - `07` 聚焦 Dashboard 现状与可视化分析能力。
 
-## 2. 当前已落地能力（1.1.0）
+## 2. 当前已落地能力（1.3.0）
 
 ### 2.1 页面结构与导航
 
 - 统一侧边栏布局（参考 LiteLLM 交互风格）
 - 顶部全局信息栏（版本、环境、入口链接）
+- 顶部支持亮色/暗色主题切换，主题状态持久化到浏览器本地
 - 主内容区滚动，移动端支持侧栏抽屉与遮罩
 
 ### 2.2 已接入页面
@@ -27,8 +28,16 @@
 - Models：模型维度请求量/成功率/成本/延迟
 - Errors：错误摘要、类型分布、最近错误
 - Prompts：模板列表、模板详情与关联对话
+- Analyzer：分析任务状态、任务历史与备份管理
 
-### 2.3 对话详情页分析能力
+### 2.3 Key / Hash 管理能力
+
+- 首次录入原始 API key 后，前端立即转换并仅保存 hash，不再回显原始 key
+- 本地 key 记录支持别名二次编辑、逐个激活/停用、全部启停
+- 页面请求只携带当前激活的 hash 集合，便于 scoped 视角切换
+- 激活集合包含 admin hash 时，页面自动切换为 admin 视角并展示全量管理能力
+
+### 2.4 对话详情页分析能力
 
 - 折叠分区：System、Tools、Skill 统计、History、User、Assistant、优化建议
 - Tool 参数展开：支持结构化参数表查看
@@ -43,6 +52,13 @@
 - 内容分析：消息角色分布、字符/词数、代码块检测、阅读时长、输入输出比
 - 请求配置：temperature/max_tokens/top_p/penalty/tool_choice 等参数展示
 - 智能优化建议：基于 token、速度、缓存、消息长度的启发式提示
+
+### 2.5 测试覆盖现状
+
+- API 结构和版本元数据由 pytest 覆盖
+- Dashboard 全页面已由 `tests/test_dashboard/test_dashboard_agent_browser.py` 做浏览器集成测试
+- 当前自动化覆盖 Overview、Conversations、Costs、Latency、Models、Errors、Prompts、Analyzer 八个页面
+- 测试同时验证 scoped hash 与 admin hash 的请求范围行为
 
 ## 3. 已清理项（本次合并）
 
