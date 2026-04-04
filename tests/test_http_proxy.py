@@ -7,6 +7,7 @@ the proxy so no real network calls are made.
 from __future__ import annotations
 
 import asyncio
+import gzip
 import json
 from pathlib import Path
 
@@ -349,6 +350,30 @@ class TestHTTPProxyForwarding:
         assert "keep-alive" not in resp.headers
         assert "x-remove-me" not in resp.headers
         assert resp.headers["x-keep"] == "good"
+
+    def test_gzip_response_preserves_raw_body_and_headers(self, tmp_path: Path):
+        payload = b'{"status":"ok","message":"hello"}' * 20
+        compressed = gzip.compress(payload)
+
+        async def gzipped(req: Request):
+            response = Response(status_code=200, content=compressed)
+            response.raw_headers = [
+                (b"content-type", b"application/json"),
+                (b"content-encoding", b"gzip"),
+                (b"content-length", str(len(compressed)).encode("ascii")),
+            ]
+            return response
+
+        upstream = make_upstream([
+            Route("/{path:path}", gzipped, methods=["GET"]),
+            Route("/", gzipped, methods=["GET"]),
+        ])
+        client, _, _ = make_proxy_with_upstream(tmp_path, upstream)
+
+        resp = client.get("/gzip")
+        assert resp.status_code == 200
+        assert resp.content == payload
+        assert resp.headers.get("content-encoding") == "gzip"
 
 
 class TestHTTPRecording:

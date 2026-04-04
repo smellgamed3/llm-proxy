@@ -308,7 +308,8 @@ class ProxyHandler:
         should_record: bool,
     ) -> Response:
         """Handle non-streaming response: buffer full body then forward."""
-        body = await upstream_resp.aread()
+        chunks = [chunk async for chunk in upstream_resp.aiter_raw()]
+        body = b"".join(chunks)
         await upstream_resp.aclose()
         duration_ms = (time.monotonic() - start) * 1000
 
@@ -346,7 +347,7 @@ class ProxyHandler:
         async def generate():
             nonlocal accumulated_text
             try:
-                async for chunk, acc in stream_and_record(upstream_resp.aiter_bytes()):
+                async for chunk, acc in stream_and_record(upstream_resp.aiter_raw()):
                     accumulated_text = acc
                     yield chunk
             except Exception as e:
