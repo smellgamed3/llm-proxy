@@ -6,6 +6,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 
 from api.dependencies import get_analytics_db, resolve_auth, AuthContext
+from api.query import SqlWhereBuilder, pagination_offset
 
 router = APIRouter(tags=["prompts"])
 
@@ -18,7 +19,7 @@ def list_prompt_templates(
     auth: AuthContext = Depends(resolve_auth),
 ) -> dict:
     """List prompt templates sorted by usage count."""
-    offset = (page - 1) * page_size
+    offset = pagination_offset(page, page_size)
     if auth.is_admin:
         count = db.execute("SELECT COUNT(*) FROM prompt_templates").fetchone()[0]
         rows = db.execute(
@@ -31,12 +32,12 @@ def list_prompt_templates(
             (page_size, offset),
         ).fetchall()
     else:
-        key_where, key_params = auth.where_clause()
+        filters = SqlWhereBuilder().add_auth(auth)
         # Only show templates the user has conversations for
         count = db.execute(
             f"""SELECT COUNT(DISTINCT template_id) FROM conversations
-                WHERE template_id IS NOT NULL AND {key_where}""",
-            key_params,
+                WHERE template_id IS NOT NULL AND {filters.and_sql.removeprefix('AND ')}""",
+            filters.params,
         ).fetchone()[0]
         rows = db.execute(
             f"""SELECT c.template_id, MIN(c.timestamp) AS first_seen,
@@ -46,11 +47,11 @@ def list_prompt_templates(
                       substr(pt.system_prompt, 1, 200) AS system_prompt_preview
                FROM conversations c
                LEFT JOIN prompt_templates pt ON c.template_id = pt.template_id
-               WHERE c.template_id IS NOT NULL AND {key_where}
+               WHERE c.template_id IS NOT NULL AND {filters.and_sql.removeprefix('AND ')}
                GROUP BY c.template_id
                ORDER BY use_count DESC
                LIMIT ? OFFSET ?""",
-            key_params + [page_size, offset],
+            filters.params + [page_size, offset],
         ).fetchall()
     return {
         "total": count,
@@ -73,10 +74,10 @@ def get_prompt_template(
         raise HTTPException(status_code=404, detail="Template not found")
     if not auth.is_admin:
         # Check that the user has at least one conversation with this template
-        key_where, key_params = auth.where_clause()
+        filters = SqlWhereBuilder().add_auth(auth)
         has = db.execute(
-            f"SELECT 1 FROM conversations WHERE template_id = ? AND {key_where} LIMIT 1",
-            [template_id] + key_params,
+            f"SELECT 1 FROM conversations WHERE template_id = ? AND {filters.and_sql.removeprefix('AND ')} LIMIT 1",
+            [template_id] + filters.params,
         ).fetchone()
         if not has:
             raise HTTPException(status_code=404, detail="Template not found")
@@ -90,8 +91,7 @@ def get_template_stats(
     auth: AuthContext = Depends(resolve_auth),
 ) -> dict:
     """Return aggregated quality stats for a prompt template."""
-    key_where, key_params = auth.where_clause()
-    extra_where = f"AND {key_where}" if key_where else ""
+    filters = SqlWhereBuilder().add_auth(auth)
     row = db.execute(
         f"""SELECT
             COUNT(*) AS total_conversations,
@@ -105,8 +105,8 @@ def get_template_stats(
             SUM(CASE WHEN finish_reason = 'length' THEN 1 ELSE 0 END) AS truncated_count,
             AVG(rating) AS avg_rating,
             COUNT(rating) AS rated_count
-        FROM conversations WHERE template_id = ? {extra_where}""",
-        [template_id] + key_params,
+        FROM conversations WHERE template_id = ? {filters.and_sql}""",
+        [template_id] + filters.params,
     ).fetchone()
     if not row or row["total_conversations"] == 0:
         raise HTTPException(status_code=404, detail="No conversations for template")
@@ -158,21 +158,20 @@ def list_template_conversations(
     auth: AuthContext = Depends(resolve_auth),
 ) -> dict:
     """List conversations using a specific prompt template."""
-    key_where, key_params = auth.where_clause()
-    extra_where = f"AND {key_where}" if key_where else ""
+    filters = SqlWhereBuilder().add_auth(auth)
     count = db.execute(
-        f"SELECT COUNT(*) FROM conversations WHERE template_id = ? {extra_where}",
-        [template_id] + key_params,
+        f"SELECT COUNT(*) FROM conversations WHERE template_id = ? {filters.and_sql}",
+        [template_id] + filters.params,
     ).fetchone()[0]
-    offset = (page - 1) * page_size
+    offset = pagination_offset(page, page_size)
     rows = db.execute(
         f"""SELECT id, timestamp, model, status, duration_ms,
                   total_tokens, cost_usd, finish_reason, rating,
                   substr(coalesce(user_prompt, ''), 1, 120) AS user_prompt_preview,
                   substr(coalesce(assistant_response, ''), 1, 120) AS assistant_response_preview
-           FROM conversations WHERE template_id = ? {extra_where}
+           FROM conversations WHERE template_id = ? {filters.and_sql}
            ORDER BY timestamp DESC LIMIT ? OFFSET ?""",
-        [template_id] + key_params + [page_size, offset],
+        [template_id] + filters.params + [page_size, offset],
     ).fetchall()
     return {
         "total": count,
@@ -190,18 +189,17 @@ def get_template_daily(
     auth: AuthContext = Depends(resolve_auth),
 ) -> list[dict]:
     """Return daily usage trend for a specific template."""
-    key_where, key_params = auth.where_clause()
-    extra_where = f"AND {key_where}" if key_where else ""
+    filters = SqlWhereBuilder().add_auth(auth)
     rows = db.execute(
         f"""SELECT date(timestamp) AS date,
                   COUNT(*) AS requests,
                   SUM(COALESCE(cost_usd, 0)) AS cost_usd,
                   AVG(COALESCE(duration_ms, 0)) AS avg_duration_ms
            FROM conversations
-           WHERE template_id = ? AND timestamp >= date('now', ?) {extra_where}
+           WHERE template_id = ? AND timestamp >= date('now', ?) {filters.and_sql}
            GROUP BY date(timestamp)
            ORDER BY date ASC""",
-        [template_id, f"-{days} days"] + key_params,
+        [template_id, f"-{days} days"] + filters.params,
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -214,8 +212,7 @@ def compare_templates(
     auth: AuthContext = Depends(resolve_auth),
 ) -> dict:
     """Compare two prompt templates side-by-side."""
-    key_where, key_params = auth.where_clause()
-    extra_where = f"AND {key_where}" if key_where else ""
+    filters = SqlWhereBuilder().add_auth(auth)
 
     def _stats(tid: str) -> dict:
         tmpl = db.execute(
@@ -231,8 +228,8 @@ def compare_templates(
                   SUM(COALESCE(cost_usd, 0)) AS total_cost,
                   AVG(COALESCE(total_tokens, 0)) AS avg_tokens,
                   AVG(rating) AS avg_rating
-            FROM conversations WHERE template_id = ? {extra_where}""",
-            [tid] + key_params,
+            FROM conversations WHERE template_id = ? {filters.and_sql}""",
+            [tid] + filters.params,
         ).fetchone()
         total = agg["total"] or 0
         return {

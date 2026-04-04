@@ -4,7 +4,14 @@
 
 提供提示词提取、Token 用量统计、成本计算、延迟分析、成功/失败分类等能力，并通过 RESTful API 和 Dashboard 对外提供查询服务。
 
-当前版本：`1.0.0`
+当前版本：`1.1.0`
+
+## 质量基线
+
+- 统一日志配置：`proxy`、`analyzer`、`api` 均支持 `LOG_FORMAT=json`
+- API 默认启用基础限流，避免 dashboard / query endpoint 被瞬时打爆
+- Dashboard 公共壳层统一收敛到 `api/static/app.js`，减少多页面重复模板
+- CI 已覆盖多 Python 版本测试与镜像构建发布
 
 ## Dashboard 能力概览
 
@@ -65,7 +72,7 @@ docker compose up -d
 docker compose logs -f
 ```
 
-`docker compose` 会自动读取项目根目录的 `.env`。常用变量包括 `UPSTREAM_URL`、`PROXY_PORT`、`API_PORT`、`ADMIN_KEY_HASH`、`DASHBOARD_API_KEY`、`LOG_LEVEL`、`ANALYZER_INTERVAL`、`ANALYZER_BATCH_SIZE` 和 `TRAEFIK_HOST`。
+`docker compose` 会自动读取项目根目录的 `.env`。常用变量包括 `UPSTREAM_URL`、`PROXY_PORT`、`API_PORT`、`ADMIN_KEY_HASH`、`DASHBOARD_API_KEY`、`LOG_LEVEL`、`LOG_FORMAT`、`ANALYZER_INTERVAL`、`ANALYZER_BATCH_SIZE`、`API_RATE_LIMIT_ENABLED`、`API_RATE_LIMIT_MAX_REQUESTS`、`API_RATE_LIMIT_WINDOW_SECONDS` 和 `TRAEFIK_HOST`。
 
 如果启用了 hash 鉴权，可用下面命令从真实 API key 计算 dashboard/API 使用的 hash：
 
@@ -84,6 +91,18 @@ PY
 | 健康检查 | `http://localhost:9090/health` |
 | Dashboard | `http://localhost:9091/` |
 | API 文档 | `http://localhost:9091/docs` |
+
+### 纯 API 调用
+
+如果你不使用 Dashboard，只想把本项目作为代理与查询 API 接入到自己的程序里，直接看 [docs/08-api-client-usage.md](docs/08-api-client-usage.md)。
+
+这个文档覆盖：
+
+- 代理调用方式：如何把业务请求发到 `:9090`
+- 查询调用方式：如何用 `key_hashes` 访问 `:9091/api/*`
+- `curl`、Python、JavaScript 三种最小示例
+- Admin 与 scoped 两种鉴权模式区别
+- 常见 401 / `/v1/v1/...` / 非安全上下文加 key 失败等排障点
 
 ### 本地开发
 
@@ -121,6 +140,10 @@ uv run uvicorn api.app:create_app --factory --host 0.0.0.0 --port 9091
 | `CONFIG_FILE` | `/etc/llm-proxy/config.yaml` | 配置文件路径 |
 | `ADMIN_KEY_HASH` | 空 | Admin hash，匹配后可查看全部数据和管理接口 |
 | `DASHBOARD_API_KEY` | 空 | 旧版 Bearer 管理口令，兼容模式使用 |
+| `LOG_FORMAT` | `text` | `text` 或 `json`，控制服务日志格式 |
+| `API_RATE_LIMIT_ENABLED` | `true` | 是否启用 API 限流 |
+| `API_RATE_LIMIT_MAX_REQUESTS` | `300` | 时间窗口内允许的最大 API 请求数 |
+| `API_RATE_LIMIT_WINDOW_SECONDS` | `60` | API 限流窗口大小（秒） |
 
 ### 配置文件 (`config.yaml`)
 
@@ -246,6 +269,8 @@ RESTful JSON API，供 Dashboard 和业务系统使用：
 | `GET /api/errors/summary` | 错误概览 |
 | `GET /api/errors/recent` | 最近错误列表 |
 | `POST /api/admin/analyzer/rerun` | 触发一次重分析/补跑 |
+
+更完整的纯 API 集成说明见 [docs/08-api-client-usage.md](docs/08-api-client-usage.md)。
 
 完整 API 文档：`http://localhost:9091/docs`
 

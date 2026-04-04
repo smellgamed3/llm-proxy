@@ -6,6 +6,7 @@ from typing import Any
 from fastapi import APIRouter, Depends
 
 from api.dependencies import get_analytics_db, resolve_auth, AuthContext
+from api.query import SqlWhereBuilder
 
 router = APIRouter(tags=["overview"])
 
@@ -16,8 +17,7 @@ def get_overview(
     auth: AuthContext = Depends(resolve_auth),
 ) -> dict:
     """Return high-level summary statistics."""
-    key_where, key_params = auth.where_clause()
-    where_sql = f"WHERE {key_where}" if key_where else ""
+    filters = SqlWhereBuilder().add_auth(auth)
 
     row = db.execute(f"""
         SELECT
@@ -27,8 +27,8 @@ def get_overview(
             SUM(COALESCE(cost_usd, 0)) AS total_cost_usd,
             AVG(COALESCE(duration_ms, 0)) AS avg_duration_ms,
             SUM(COALESCE(total_tokens, 0)) AS total_tokens
-        FROM conversations {where_sql}
-    """, key_params).fetchone()
+        FROM conversations {filters.where_sql}
+    """, filters.params).fetchone()
 
     total = row["total_requests"] or 0
     success = row["success_count"] or 0
@@ -52,7 +52,7 @@ def get_daily_overview(
     auth: AuthContext = Depends(resolve_auth),
 ) -> list[dict]:
     """Return daily stats for the last N days."""
-    key_where, key_params = auth.where_clause()
+    filters = SqlWhereBuilder().add_auth(auth)
     if auth.is_admin:
         # Admin: use pre-aggregated daily_stats for speed
         rows = db.execute(
@@ -69,7 +69,6 @@ def get_daily_overview(
         ).fetchall()
     else:
         # Scoped: compute from conversations
-        extra_where = f"AND {key_where}" if key_where else ""
         rows = db.execute(
             f"""SELECT date(timestamp) AS date,
                        COUNT(*) AS requests,
@@ -78,9 +77,9 @@ def get_daily_overview(
                        SUM(COALESCE(cost_usd, 0)) AS cost_usd,
                        AVG(COALESCE(duration_ms, 0)) AS avg_latency_ms
                 FROM conversations
-                WHERE timestamp >= date('now', ?) {extra_where}
+                WHERE timestamp >= date('now', ?) {filters.and_sql}
                 GROUP BY date(timestamp)
                 ORDER BY date ASC""",
-            [f"-{days} days"] + key_params,
+            [f"-{days} days"] + filters.params,
         ).fetchall()
     return [dict(r) for r in rows]

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import sys
 
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -10,6 +9,7 @@ from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket
 
 from .config import Config, load_config
+from common.logging import configure_logging
 from .recorder import Recorder
 from .proxy import ProxyHandler
 from .ws import WSProxyHandler
@@ -20,12 +20,7 @@ logger = logging.getLogger("llm-proxy")
 def create_app(config: Config | None = None) -> Starlette:
     cfg = config or load_config()
 
-    # Setup logging
-    logging.basicConfig(
-        level=getattr(logging, cfg.log_level.upper(), logging.INFO),
-        format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
-        stream=sys.stdout,
-    )
+    configure_logging(service_name="proxy", level=cfg.log_level)
 
     logger.info("Starting LLM Proxy")
     logger.info("  Upstream:    %s", cfg.upstream_url)

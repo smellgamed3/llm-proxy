@@ -27,6 +27,7 @@ services:
       - llm-proxy-logs:/data/logs
       - ./app:/app/app
       - ./analyzer:/app/analyzer
+      - ./common:/app/common
       - ./config.yaml:/etc/llm-proxy/config.yaml:ro
       - ./pricing.yaml:/etc/llm-proxy/pricing.yaml:ro
     depends_on:
@@ -62,6 +63,7 @@ services:
       - llm-analytics:/data/analytics
       - ./app:/app/app
       - ./analyzer:/app/analyzer
+      - ./common:/app/common
       - ./pricing.yaml:/etc/llm-proxy/pricing.yaml:ro
     depends_on:
       - llm-proxy
@@ -89,6 +91,7 @@ services:
       - llm-analytics:/data/analytics
       - ./api:/app/api
       - ./analyzer:/app/analyzer
+      - ./common:/app/common
     depends_on:
       - analyzer
 

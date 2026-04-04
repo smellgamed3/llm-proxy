@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from analyzer.body_reader import BodyReader
 from api.dependencies import get_analytics_db, get_raw_db, get_bodies_dir, resolve_auth, AuthContext
+from api.query import SqlWhereBuilder, pagination_offset, validate_order, validate_sort
 
 router = APIRouter(tags=["conversations"])
 
@@ -23,6 +24,49 @@ class RatingBody(BaseModel):
 
 class TagsBody(BaseModel):
     tags: list[str]
+
+
+def _conversation_filters(
+    auth: AuthContext,
+    *,
+    model: str | None = None,
+    status: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    q: str | None = None,
+    template_id: str | None = None,
+    path_prefix: str | None = None,
+    request_type: str | None = None,
+) -> SqlWhereBuilder:
+    builder = SqlWhereBuilder().add_auth(auth)
+    builder.add("model = ?", model, enabled=bool(model))
+    builder.add("status = ?", status, enabled=bool(status))
+    builder.add_date_range(date_from=date_from, date_to=date_to)
+    builder.add("template_id = ?", template_id, enabled=bool(template_id))
+    builder.add("path LIKE ?", f"{path_prefix}%", enabled=bool(path_prefix))
+    builder.add("request_type = ?", request_type, enabled=bool(request_type))
+    if q:
+        like_q = f"%{q}%"
+        builder.add(
+            "(user_prompt LIKE ? OR system_prompt LIKE ? OR assistant_response LIKE ?)",
+            like_q,
+            like_q,
+            like_q,
+        )
+    return builder
+
+
+def _scoped_conversation(
+    db: sqlite3.Connection,
+    conv_id: str,
+    auth: AuthContext,
+) -> sqlite3.Row:
+    row = db.execute("SELECT * FROM conversations WHERE id = ?", (conv_id,)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if not auth.is_admin and row["api_key_hash"] not in auth.key_hashes:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return row
 
 
 @router.get("/conversations")
@@ -43,54 +87,26 @@ def list_conversations(
     auth: AuthContext = Depends(resolve_auth),
 ) -> dict:
     """List conversations with filtering and pagination."""
-    allowed_sort = {"timestamp", "duration_ms", "cost_usd", "total_tokens"}
-    if sort not in allowed_sort:
-        sort = "timestamp"
-    order_dir = "DESC" if order.lower() == "desc" else "ASC"
-
-    where_clauses: list[str] = []
-    params: list[Any] = []
-
-    # Auth-based key filtering
-    key_where, key_params = auth.where_clause()
-    if key_where:
-        where_clauses.append(key_where)
-        params.extend(key_params)
-
-    if model:
-        where_clauses.append("model = ?")
-        params.append(model)
-    if status:
-        where_clauses.append("status = ?")
-        params.append(status)
-    if date_from:
-        where_clauses.append("timestamp >= ?")
-        params.append(date_from)
-    if date_to:
-        where_clauses.append("timestamp <= ?")
-        params.append(date_to + "T23:59:59")
-    if template_id:
-        where_clauses.append("template_id = ?")
-        params.append(template_id)
-    if path_prefix:
-        where_clauses.append("path LIKE ?")
-        params.append(f"{path_prefix}%")
-    if request_type:
-        where_clauses.append("request_type = ?")
-        params.append(request_type)
-    if q:
-        where_clauses.append("(user_prompt LIKE ? OR system_prompt LIKE ? OR assistant_response LIKE ?)")
-        like_q = f"%{q}%"
-        params.extend([like_q, like_q, like_q])
-
-    where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+    sort = validate_sort(sort, allowed={"timestamp", "duration_ms", "cost_usd", "total_tokens"}, default="timestamp")
+    order_dir = validate_order(order)
+    filters = _conversation_filters(
+        auth,
+        model=model,
+        status=status,
+        date_from=date_from,
+        date_to=date_to,
+        q=q,
+        template_id=template_id,
+        path_prefix=path_prefix,
+        request_type=request_type,
+    )
 
     count_row = db.execute(
-        f"SELECT COUNT(*) FROM conversations {where_sql}", params
+        f"SELECT COUNT(*) FROM conversations {filters.where_sql}", filters.params
     ).fetchone()
     total = count_row[0]
 
-    offset = (page - 1) * page_size
+    offset = pagination_offset(page, page_size)
     rows = db.execute(
         f"""SELECT id, seq, timestamp, path, method, provider, model, request_type,
                    status, error_type, status_code, is_stream, duration_ms,
@@ -98,10 +114,10 @@ def list_conversations(
                    template_id, finish_reason, has_tools, messages_count,
                    substr(coalesce(user_prompt, ''), 1, 160) AS user_prompt_preview,
                    substr(coalesce(assistant_response, ''), 1, 160) AS assistant_response_preview
-            FROM conversations {where_sql}
+            FROM conversations {filters.where_sql}
             ORDER BY {sort} {order_dir}
             LIMIT ? OFFSET ?""",
-        params + [page_size, offset],
+        filters.params + [page_size, offset],
     ).fetchall()
 
     return {
@@ -128,32 +144,14 @@ def export_conversations(
     if fmt not in ("jsonl", "csv"):
         raise HTTPException(status_code=400, detail="fmt must be jsonl or csv")
 
-    where_clauses: list[str] = []
-    params: list[Any] = []
-
-    # Auth-based key filtering
-    key_where, key_params = auth.where_clause()
-    if key_where:
-        where_clauses.append(key_where)
-        params.extend(key_params)
-
-    if model:
-        where_clauses.append("model = ?")
-        params.append(model)
-    if status:
-        where_clauses.append("status = ?")
-        params.append(status)
-    if date_from:
-        where_clauses.append("timestamp >= ?")
-        params.append(date_from)
-    if date_to:
-        where_clauses.append("timestamp <= ?")
-        params.append(date_to + "T23:59:59")
-    if template_id:
-        where_clauses.append("template_id = ?")
-        params.append(template_id)
-
-    where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+    filters = _conversation_filters(
+        auth,
+        model=model,
+        status=status,
+        date_from=date_from,
+        date_to=date_to,
+        template_id=template_id,
+    )
     safe_limit = min(limit, 50000)
 
     rows = db.execute(
@@ -162,9 +160,9 @@ def export_conversations(
                    prompt_tokens, completion_tokens, total_tokens, cost_usd,
                    template_id, finish_reason, rating, tags,
                    user_prompt, assistant_response
-            FROM conversations {where_sql}
+            FROM conversations {filters.where_sql}
             ORDER BY timestamp DESC LIMIT ?""",
-        params + [safe_limit],
+        filters.params + [safe_limit],
     ).fetchall()
 
     if fmt == "jsonl":
@@ -201,16 +199,7 @@ def get_conversation(
     auth: AuthContext = Depends(resolve_auth),
 ) -> dict:
     """Get full conversation detail including extracted fields."""
-    row = db.execute(
-        "SELECT * FROM conversations WHERE id = ?", (conv_id,)
-    ).fetchone()
-    if row is None:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    data = dict(row)
-    # Scope check: non-admin can only view their own key's conversations
-    if not auth.is_admin:
-        if data.get("api_key_hash") not in auth.key_hashes:
-            raise HTTPException(status_code=404, detail="Conversation not found")
+    data = dict(_scoped_conversation(db, conv_id, auth))
     if data.get("tools_list"):
         try:
             data["tools_list"] = json.loads(data["tools_list"])
@@ -230,11 +219,7 @@ def get_raw_conversation(
     """Get raw request/response data from raw.db."""
     # Scope check via analytics conversation
     if not auth.is_admin:
-        conv_row = db.execute(
-            "SELECT api_key_hash FROM conversations WHERE id = ?", (conv_id,)
-        ).fetchone()
-        if conv_row is None or conv_row["api_key_hash"] not in auth.key_hashes:
-            raise HTTPException(status_code=404, detail="Raw record not found")
+        _scoped_conversation(db, conv_id, auth)
 
     row = raw_db.execute(
         "SELECT * FROM raw_requests WHERE id = ?", (conv_id,)
@@ -258,13 +243,10 @@ def set_rating(
     conv_id: str,
     body: RatingBody,
     db: sqlite3.Connection = Depends(get_analytics_db),
+    auth: AuthContext = Depends(resolve_auth),
 ) -> dict:
     """Set or update a conversation rating (1-5) with optional comment."""
-    existing = db.execute(
-        "SELECT id FROM conversations WHERE id = ?", (conv_id,)
-    ).fetchone()
-    if not existing:
-        raise HTTPException(status_code=404, detail="Conversation not found")
+    _scoped_conversation(db, conv_id, auth)
     db.execute(
         "UPDATE conversations SET rating = ?, rating_comment = ? WHERE id = ?",
         (body.rating, body.comment, conv_id),
@@ -277,13 +259,10 @@ def set_rating(
 def delete_rating(
     conv_id: str,
     db: sqlite3.Connection = Depends(get_analytics_db),
+    auth: AuthContext = Depends(resolve_auth),
 ) -> dict:
     """Clear a conversation rating."""
-    existing = db.execute(
-        "SELECT id FROM conversations WHERE id = ?", (conv_id,)
-    ).fetchone()
-    if not existing:
-        raise HTTPException(status_code=404, detail="Conversation not found")
+    _scoped_conversation(db, conv_id, auth)
     db.execute(
         "UPDATE conversations SET rating = NULL, rating_comment = NULL WHERE id = ?",
         (conv_id,),
@@ -300,13 +279,10 @@ def set_tags(
     conv_id: str,
     body: TagsBody,
     db: sqlite3.Connection = Depends(get_analytics_db),
+    auth: AuthContext = Depends(resolve_auth),
 ) -> dict:
     """Set tags for a conversation (replaces existing)."""
-    existing = db.execute(
-        "SELECT id FROM conversations WHERE id = ?", (conv_id,)
-    ).fetchone()
-    if not existing:
-        raise HTTPException(status_code=404, detail="Conversation not found")
+    _scoped_conversation(db, conv_id, auth)
     tags_json = json.dumps(body.tags) if body.tags else None
     db.execute(
         "UPDATE conversations SET tags = ? WHERE id = ?",

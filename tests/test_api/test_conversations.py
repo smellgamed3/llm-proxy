@@ -363,6 +363,68 @@ class TestTags:
         assert json.loads(detail["tags"]) == ["c"]
 
 
+class TestScopedConversationMutations:
+    def test_scoped_user_cannot_rate_foreign_conversation(
+        self,
+        analytics_db_path: str,
+        raw_db_path: str,
+        tmp_path: Path,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("ANALYTICS_DB", analytics_db_path)
+        monkeypatch.setenv("RAW_DB", raw_db_path)
+        monkeypatch.setenv("BODIES_DIR", str(tmp_path / "bodies"))
+        store = AnalyticsStore(analytics_db_path)
+        conv = _make_conv(1)
+        conv["api_key_hash"] = "ownerhash"
+        store.upsert_conversation(conv)
+
+        client = TestClient(create_app(), headers={"Authorization": "Bearer otherhash"})
+        response = client.put("/api/conversations/conv-1/rating", json={"rating": 4})
+        assert response.status_code == 404
+
+    def test_scoped_user_cannot_tag_foreign_conversation(
+        self,
+        analytics_db_path: str,
+        raw_db_path: str,
+        tmp_path: Path,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("ANALYTICS_DB", analytics_db_path)
+        monkeypatch.setenv("RAW_DB", raw_db_path)
+        monkeypatch.setenv("BODIES_DIR", str(tmp_path / "bodies"))
+        store = AnalyticsStore(analytics_db_path)
+        conv = _make_conv(1)
+        conv["api_key_hash"] = "ownerhash"
+        store.upsert_conversation(conv)
+
+        client = TestClient(create_app(), headers={"Authorization": "Bearer otherhash"})
+        response = client.put("/api/conversations/conv-1/tags", json={"tags": ["private"]})
+        assert response.status_code == 404
+
+    def test_scoped_user_can_mutate_owned_conversation(
+        self,
+        analytics_db_path: str,
+        raw_db_path: str,
+        tmp_path: Path,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("ANALYTICS_DB", analytics_db_path)
+        monkeypatch.setenv("RAW_DB", raw_db_path)
+        monkeypatch.setenv("BODIES_DIR", str(tmp_path / "bodies"))
+        store = AnalyticsStore(analytics_db_path)
+        conv = _make_conv(1)
+        conv["api_key_hash"] = "ownerhash"
+        store.upsert_conversation(conv)
+
+        client = TestClient(create_app(), headers={"Authorization": "Bearer ownerhash"})
+        rate_response = client.put("/api/conversations/conv-1/rating", json={"rating": 5})
+        tags_response = client.put("/api/conversations/conv-1/tags", json={"tags": ["keep"]})
+
+        assert rate_response.status_code == 200
+        assert tags_response.status_code == 200
+
+
 class TestExport:
     def test_export_jsonl(self, client: TestClient, store: AnalyticsStore):
         for i in range(1, 4):

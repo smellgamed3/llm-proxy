@@ -124,3 +124,31 @@ class TestLegacyAuth:
     def test_static_files_not_blocked(self, client_with_legacy: TestClient):
         r = client_with_legacy.get("/")
         assert r.status_code != 401
+
+
+class TestRateLimit:
+    @pytest.fixture
+    def limited_client(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+        analytics_db = tmp_path / "analytics.db"
+        raw_db = tmp_path / "raw.db"
+        monkeypatch.setenv("ANALYTICS_DB", str(analytics_db))
+        monkeypatch.setenv("RAW_DB", str(raw_db))
+        monkeypatch.setenv("BODIES_DIR", str(tmp_path / "bodies"))
+        monkeypatch.setenv("API_RATE_LIMIT_MAX_REQUESTS", "2")
+        monkeypatch.setenv("API_RATE_LIMIT_WINDOW_SECONDS", "60")
+        AnalyticsStore(str(analytics_db))
+        _init_raw_db(str(raw_db))
+        return TestClient(create_app())
+
+    def test_rate_limit_blocks_excess_requests(self, limited_client: TestClient):
+        headers = {"Authorization": "Bearer scopedhash0000000000000000000001"}
+        assert limited_client.get("/api/overview", headers=headers).status_code == 200
+        assert limited_client.get("/api/overview", headers=headers).status_code == 200
+
+        blocked = limited_client.get("/api/overview", headers=headers)
+        assert blocked.status_code == 429
+        assert blocked.headers["Retry-After"]
+
+    def test_static_files_not_rate_limited(self, limited_client: TestClient):
+        response = limited_client.get("/")
+        assert response.status_code == 200

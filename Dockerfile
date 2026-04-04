@@ -11,6 +11,7 @@ COPY pyproject.toml uv.lock ./
 # Install production dependencies only, no project itself
 RUN uv sync --frozen --no-dev --no-install-project
 
+COPY common/ ./common/
 COPY app/ ./app/
 COPY config.yaml /etc/llm-proxy/config.yaml
 

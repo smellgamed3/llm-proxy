@@ -1,6 +1,108 @@
 // LLM Proxy Analytics Dashboard — app.js
 
 const API = '/api';
+const APP_VERSION = 'v1.1.0';
+
+const NAV_GROUPS = [
+  {
+    label: 'Analytics',
+    items: [
+      {
+        href: '/',
+        match: '/index.html',
+        label: 'Overview',
+        icon: '<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M3 14V9m6 5V5m6 9V2"/></svg>',
+      },
+      {
+        href: '/conversations.html',
+        label: 'Conversations',
+        icon: '<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4c0-.6.4-1 1-1h12c.6 0 1 .4 1 1v7c0 .6-.4 1-1 1h-4l-2 3v-3H3c-.6 0-1-.4-1-1V4z"/></svg>',
+      },
+      {
+        href: '/costs.html',
+        label: 'Costs',
+        icon: '<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="7"/><path d="M9 5v8M7 7h3a1.5 1.5 0 010 3H7m0 0h3.5a1.5 1.5 0 010 3H7"/></svg>',
+      },
+      {
+        href: '/models.html',
+        label: 'Models',
+        icon: '<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2L3 5.5v7L9 16l6-3.5v-7L9 2zM3 5.5L9 9m0 0v7m0-7l6-3.5"/></svg>',
+      },
+    ],
+  },
+  {
+    label: 'Monitoring',
+    items: [
+      {
+        href: '/errors.html',
+        label: 'Errors',
+        icon: '<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3L2 15h14L9 3z"/><path d="M9 8v3"/><circle cx="9" cy="13" r=".5" fill="currentColor"/></svg>',
+      },
+      {
+        href: '/latency.html',
+        label: 'Latency',
+        icon: '<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="7"/><path d="M9 5v4l2.5 1.5"/></svg>',
+      },
+      {
+        href: '/analyzer.html',
+        label: 'Analyzer',
+        icon: '<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h12v12H3z"/><path d="M6 11V7m3 4V5m3 6V8"/></svg>',
+      },
+    ],
+  },
+  {
+    label: 'Content',
+    items: [
+      {
+        href: '/prompts.html',
+        label: 'Prompts',
+        icon: '<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 2h6l4 4v10c0 .6-.4 1-1 1H5c-.6 0-1-.4-1-1V3c0-.6.4-1 1-1z"/><path d="M11 2v4h4M7 10h4m-4 3h4"/></svg>',
+      },
+    ],
+  },
+];
+
+function normalizePagePath(pathname) {
+  return pathname === '/' ? '/index.html' : pathname;
+}
+
+function renderAppShell() {
+  if (document.querySelector('.app-header') || document.querySelector('.app-sidebar')) return;
+  const main = document.querySelector('main.app-content');
+  if (!main) return;
+
+  const currentPath = normalizePagePath(window.location.pathname);
+  const navMarkup = NAV_GROUPS.map(group => {
+    const items = group.items.map(item => {
+      const isActive = currentPath === (item.match || item.href);
+      return `
+        <a href="${item.href}" class="nav-item${isActive ? ' active' : ''}">
+          ${item.icon}
+          ${item.label}
+        </a>`;
+    }).join('');
+
+    return `
+      <div class="nav-group">
+        <div class="nav-group-label">${group.label}</div>
+        ${items}
+      </div>`;
+  }).join('');
+
+  const shell = document.createRange().createContextualFragment(`
+    <header class="app-header">
+      <div class="header-brand">
+        <span class="brand">LLM Proxy Analytics</span>
+        <span class="header-version">${APP_VERSION}</span>
+      </div>
+      <div id="key-manager" class="key-manager"></div>
+    </header>
+    <aside class="app-sidebar">
+      <nav class="sidebar-nav">${navMarkup}</nav>
+    </aside>
+  `);
+  document.body.insertBefore(shell, main);
+}
 
 // ── API Key Hash Management ───────────────────────────────────────────────
 
@@ -33,11 +135,110 @@ function removeKeyHash(hash) {
 }
 
 async function computeKeyHash(apiKey) {
-  const data = new TextEncoder().encode(apiKey.trim());
-  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-  const fullHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-  return fullHex.slice(0, 32);
+  const normalized = apiKey.trim();
+  if (!normalized) return '';
+
+  const subtle = globalThis.crypto && globalThis.crypto.subtle;
+  if (subtle) {
+    const data = new TextEncoder().encode(normalized);
+    const hashBuffer = await subtle.digest('SHA-256', data);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    const fullHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+    return fullHex.slice(0, 32);
+  }
+
+  return sha256Hex(normalized).slice(0, 32);
+}
+
+function sha256Hex(input) {
+  const bytes = new TextEncoder().encode(input);
+  const bitLength = bytes.length * 8;
+  const paddedLength = (((bytes.length + 9 + 63) >> 6) << 6);
+  const padded = new Uint8Array(paddedLength);
+  padded.set(bytes);
+  padded[bytes.length] = 0x80;
+
+  const view = new DataView(padded.buffer);
+  const highBits = Math.floor(bitLength / 0x100000000);
+  const lowBits = bitLength >>> 0;
+  view.setUint32(paddedLength - 8, highBits, false);
+  view.setUint32(paddedLength - 4, lowBits, false);
+
+  const words = new Uint32Array(64);
+  const state = new Uint32Array([
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+    0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+  ]);
+  const constants = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+    0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+    0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+    0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+    0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+  ];
+
+  for (let offset = 0; offset < paddedLength; offset += 64) {
+    for (let i = 0; i < 16; i += 1) {
+      words[i] = view.getUint32(offset + i * 4, false);
+    }
+    for (let i = 16; i < 64; i += 1) {
+      const s0 = rightRotate(words[i - 15], 7) ^ rightRotate(words[i - 15], 18) ^ (words[i - 15] >>> 3);
+      const s1 = rightRotate(words[i - 2], 17) ^ rightRotate(words[i - 2], 19) ^ (words[i - 2] >>> 10);
+      words[i] = add32(words[i - 16], s0, words[i - 7], s1);
+    }
+
+    let [a, b, c, d, e, f, g, h] = state;
+
+    for (let i = 0; i < 64; i += 1) {
+      const s1 = rightRotate(e, 6) ^ rightRotate(e, 11) ^ rightRotate(e, 25);
+      const ch = (e & f) ^ (~e & g);
+      const temp1 = add32(h, s1, ch, constants[i], words[i]);
+      const s0 = rightRotate(a, 2) ^ rightRotate(a, 13) ^ rightRotate(a, 22);
+      const maj = (a & b) ^ (a & c) ^ (b & c);
+      const temp2 = add32(s0, maj);
+
+      h = g;
+      g = f;
+      f = e;
+      e = add32(d, temp1);
+      d = c;
+      c = b;
+      b = a;
+      a = add32(temp1, temp2);
+    }
+
+    state[0] = add32(state[0], a);
+    state[1] = add32(state[1], b);
+    state[2] = add32(state[2], c);
+    state[3] = add32(state[3], d);
+    state[4] = add32(state[4], e);
+    state[5] = add32(state[5], f);
+    state[6] = add32(state[6], g);
+    state[7] = add32(state[7], h);
+  }
+
+  return Array.from(state)
+    .map((word) => word.toString(16).padStart(8, '0'))
+    .join('');
+}
+
+function rightRotate(value, shift) {
+  return (value >>> shift) | (value << (32 - shift));
+}
+
+function add32(...values) {
+  return values.reduce((sum, value) => (sum + value) >>> 0, 0);
 }
 
 function getActiveKeyHashes() {
@@ -2770,7 +2971,7 @@ function initLatencyTimeRange() {
 
 async function setConversationRating(convId, rating) {
   try {
-    await fetch(`${API}/conversations/${convId}/rating`, {
+    await requestJSON(`${API}/conversations/${convId}/rating`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ rating }),
@@ -2781,7 +2982,7 @@ async function setConversationRating(convId, rating) {
 
 async function clearConversationRating(convId) {
   try {
-    await fetch(`${API}/conversations/${convId}/rating`, { method: 'DELETE' });
+    await requestJSON(`${API}/conversations/${convId}/rating`, { method: 'DELETE' });
     showConversationDetail(convId);
   } catch (e) { console.error('Clear rating error:', e); }
 }
@@ -2796,7 +2997,7 @@ async function addConversationTag(convId) {
     let tags = [];
     try { tags = JSON.parse(detail.tags || '[]'); } catch { tags = []; }
     if (!tags.includes(newTag)) tags.push(newTag);
-    await fetch(`${API}/conversations/${convId}/tags`, {
+    await requestJSON(`${API}/conversations/${convId}/tags`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ tags }),
@@ -2811,7 +3012,7 @@ async function removeConversationTag(convId, tagToRemove) {
     let tags = [];
     try { tags = JSON.parse(detail.tags || '[]'); } catch { tags = []; }
     tags = tags.filter(t => t !== tagToRemove);
-    await fetch(`${API}/conversations/${convId}/tags`, {
+    await requestJSON(`${API}/conversations/${convId}/tags`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ tags }),
@@ -2827,7 +3028,7 @@ function exportConversations(format) {
   params.delete('page');
   params.delete('page_size');
   params.set('fmt', format);
-  window.open(`${API}/conversations/export?${params}`, '_blank');
+  window.open(appendAuthToUrl(`${API}/conversations/export?${params}`), '_blank');
 }
 
 // ── Models page ───────────────────────────────────────────────────────────
@@ -3029,6 +3230,8 @@ async function copyHash(hash) {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+  renderAppShell();
+
   // Initialize key management UI
   renderKeyManager();
   if (getActiveKeyHashes().length === 0) {

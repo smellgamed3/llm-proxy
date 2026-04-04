@@ -4,6 +4,7 @@ import json
 import logging
 
 from .base import BaseExtractor, ExtractionResult, classify_status
+from .utils import content_blocks_to_text
 
 logger = logging.getLogger("analyzer.extractors.anthropic")
 
@@ -35,18 +36,9 @@ class AnthropicExtractor(BaseExtractor):
         messages = req_data.get("messages", [])
         result.messages_count = len(messages)
         result.system_prompt = req_data.get("system")
-
-        # Extract last user message
         for msg in reversed(messages):
             if msg.get("role") == "user":
-                content = msg.get("content", "")
-                if isinstance(content, list):
-                    text_parts = [
-                        b.get("text", "") for b in content
-                        if isinstance(b, dict) and b.get("type") == "text"
-                    ]
-                    content = " ".join(text_parts)
-                result.user_prompt = content
+                result.user_prompt = content_blocks_to_text(msg.get("content"))
                 break
 
         status_code = raw_record.get("status_code")
@@ -77,12 +69,6 @@ class AnthropicExtractor(BaseExtractor):
 
             result.finish_reason = data.get("stop_reason")
 
-            content_blocks = data.get("content", [])
-            text_parts = [
-                b.get("text", "") for b in content_blocks
-                if isinstance(b, dict) and b.get("type") == "text"
-            ]
-            if text_parts:
-                result.assistant_response = "".join(text_parts)
+            result.assistant_response = content_blocks_to_text(data.get("content"), separator="")
 
         return result

@@ -5,6 +5,7 @@ import sqlite3
 from fastapi import APIRouter, Depends
 
 from api.dependencies import get_analytics_db, resolve_auth, AuthContext
+from api.query import SqlWhereBuilder
 
 router = APIRouter(tags=["latency"])
 
@@ -18,28 +19,15 @@ def get_latency_summary(
     auth: AuthContext = Depends(resolve_auth),
 ) -> dict:
     """Return latency percentiles (p50, p95, p99)."""
-    where = []
-    params = []
-    key_where, key_params = auth.where_clause()
-    if key_where:
-        where.append(key_where)
-        params.extend(key_params)
-    if model:
-        where.append("model = ?")
-        params.append(model)
-    if date_from:
-        where.append("timestamp >= ?")
-        params.append(date_from)
-    if date_to:
-        where.append("timestamp <= ?")
-        params.append(date_to + "T23:59:59")
-    where.append("duration_ms IS NOT NULL")
-    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+    filters = SqlWhereBuilder().add_auth(auth)
+    filters.add("model = ?", model, enabled=bool(model))
+    filters.add_date_range(date_from=date_from, date_to=date_to)
+    filters.add("duration_ms IS NOT NULL")
 
     rows = db.execute(
-        f"""SELECT duration_ms FROM conversations {where_sql}
+        f"""SELECT duration_ms FROM conversations {filters.where_sql}
             ORDER BY duration_ms ASC""",
-        params,
+        filters.params,
     ).fetchall()
 
     values = [r["duration_ms"] for r in rows]
@@ -65,15 +53,14 @@ def get_latency_by_model(
     auth: AuthContext = Depends(resolve_auth),
 ) -> list[dict]:
     """Return avg latency per model."""
-    key_where, key_params = auth.where_clause()
-    extra_where = f"AND {key_where}" if key_where else ""
+    filters = SqlWhereBuilder().add_auth(auth)
     rows = db.execute(
         f"""SELECT model, AVG(duration_ms) AS avg_ms, COUNT(*) AS count
            FROM conversations
-           WHERE duration_ms IS NOT NULL {extra_where}
+           WHERE duration_ms IS NOT NULL {filters.and_sql}
            GROUP BY model
            ORDER BY avg_ms DESC""",
-        key_params,
+        filters.params,
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -85,7 +72,7 @@ def get_daily_latency(
     auth: AuthContext = Depends(resolve_auth),
 ) -> list[dict]:
     """Return daily average latency trend."""
-    key_where, key_params = auth.where_clause()
+    filters = SqlWhereBuilder().add_auth(auth)
     if auth.is_admin:
         rows = db.execute(
             """SELECT date, AVG(avg_duration_ms) AS avg_ms,
@@ -97,16 +84,15 @@ def get_daily_latency(
             (f"-{days} days",),
         ).fetchall()
     else:
-        extra_where = f"AND {key_where}" if key_where else ""
         rows = db.execute(
             f"""SELECT date(timestamp) AS date,
                        AVG(COALESCE(duration_ms, 0)) AS avg_ms,
                        COUNT(*) AS requests
                 FROM conversations
-                WHERE timestamp >= date('now', ?) {extra_where}
+                WHERE timestamp >= date('now', ?) {filters.and_sql}
                 GROUP BY date(timestamp)
                 ORDER BY date ASC""",
-            [f"-{days} days"] + key_params,
+            [f"-{days} days"] + filters.params,
         ).fetchall()
     return [dict(r) for r in rows]
 
@@ -118,16 +104,9 @@ def get_latency_distribution(
     auth: AuthContext = Depends(resolve_auth),
 ) -> list[dict]:
     """Return latency distribution in buckets for histogram."""
-    where = ["duration_ms IS NOT NULL"]
-    params: list = []
-    key_where, key_params = auth.where_clause()
-    if key_where:
-        where.append(key_where)
-        params.extend(key_params)
-    if model:
-        where.append("model = ?")
-        params.append(model)
-    where_sql = "WHERE " + " AND ".join(where)
+    filters = SqlWhereBuilder().add_auth(auth)
+    filters.add("duration_ms IS NOT NULL")
+    filters.add("model = ?", model, enabled=bool(model))
 
     buckets = [0, 100, 250, 500, 1000, 2000, 5000, 10000, 30000, 60000]
     result = []
@@ -136,14 +115,14 @@ def get_latency_distribution(
         hi = buckets[i + 1] if i + 1 < len(buckets) else None
         if hi is not None:
             count = db.execute(
-                f"SELECT COUNT(*) FROM conversations {where_sql} AND duration_ms >= ? AND duration_ms < ?",
-                params + [lo, hi],
+                f"SELECT COUNT(*) FROM conversations {filters.where_sql} AND duration_ms >= ? AND duration_ms < ?",
+                filters.params + [lo, hi],
             ).fetchone()[0]
             label = f"{lo}-{hi}ms"
         else:
             count = db.execute(
-                f"SELECT COUNT(*) FROM conversations {where_sql} AND duration_ms >= ?",
-                params + [lo],
+                f"SELECT COUNT(*) FROM conversations {filters.where_sql} AND duration_ms >= ?",
+                filters.params + [lo],
             ).fetchone()[0]
             label = f"{lo}ms+"
         result.append({"bucket": label, "count": count})

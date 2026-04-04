@@ -5,6 +5,7 @@ import sqlite3
 from fastapi import APIRouter, Depends
 
 from api.dependencies import get_analytics_db, resolve_auth, AuthContext
+from api.query import SqlWhereBuilder
 
 router = APIRouter(tags=["errors"])
 
@@ -17,28 +18,16 @@ def get_errors_summary(
     auth: AuthContext = Depends(resolve_auth),
 ) -> dict:
     """Return error count and top error types."""
-    where = []
-    params = []
-    key_where, key_params = auth.where_clause()
-    if key_where:
-        where.append(key_where)
-        params.extend(key_params)
-    if date_from:
-        where.append("timestamp >= ?")
-        params.append(date_from)
-    if date_to:
-        where.append("timestamp <= ?")
-        params.append(date_to + "T23:59:59")
-    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+    filters = SqlWhereBuilder().add_auth(auth).add_date_range(date_from=date_from, date_to=date_to)
 
     total = db.execute(
-        f"SELECT COUNT(*) FROM conversations {where_sql}", params
+        f"SELECT COUNT(*) FROM conversations {filters.where_sql}", filters.params
     ).fetchone()[0]
 
-    error_where = f"{where_sql} {'AND' if where else 'WHERE'} status != 'success'"
+    error_where = f"{filters.where_sql} {'AND' if filters.clauses else 'WHERE'} status != 'success'"
     errors = db.execute(
         f"SELECT COUNT(*) FROM conversations {error_where}",
-        params,
+        filters.params,
     ).fetchone()[0]
 
     top_types = db.execute(
@@ -46,7 +35,7 @@ def get_errors_summary(
             FROM conversations
             {error_where} AND error_type IS NOT NULL
             GROUP BY error_type ORDER BY count DESC LIMIT 10""",
-        params,
+        filters.params,
     ).fetchall()
 
     return {
@@ -64,15 +53,14 @@ def get_recent_errors(
     auth: AuthContext = Depends(resolve_auth),
 ) -> list[dict]:
     """Return most recent error conversations."""
-    key_where, key_params = auth.where_clause()
-    extra_where = f"AND {key_where}" if key_where else ""
+    filters = SqlWhereBuilder().add_auth(auth)
     rows = db.execute(
         f"""SELECT id, timestamp, model, status, error_type, error_message,
                   status_code, duration_ms
            FROM conversations
-           WHERE status != 'success' {extra_where}
+           WHERE status != 'success' {filters.and_sql}
            ORDER BY timestamp DESC LIMIT ?""",
-        key_params + [limit],
+        filters.params + [limit],
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -84,17 +72,16 @@ def get_errors_daily(
     auth: AuthContext = Depends(resolve_auth),
 ) -> list[dict]:
     """Return daily error counts for chart."""
-    key_where, key_params = auth.where_clause()
-    extra_where = f"AND {key_where}" if key_where else ""
+    filters = SqlWhereBuilder().add_auth(auth)
     rows = db.execute(
         f"""SELECT date(timestamp) AS date,
                   COUNT(*) AS error_count,
                   COUNT(DISTINCT error_type) AS error_types
            FROM conversations
-           WHERE status != 'success' AND timestamp >= date('now', ?) {extra_where}
+           WHERE status != 'success' AND timestamp >= date('now', ?) {filters.and_sql}
            GROUP BY date(timestamp)
            ORDER BY date ASC""",
-        [f"-{days} days"] + key_params,
+        [f"-{days} days"] + filters.params,
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -106,15 +93,14 @@ def get_errors_by_type(
     auth: AuthContext = Depends(resolve_auth),
 ) -> list[dict]:
     """Return error distribution by type for pie chart."""
-    key_where, key_params = auth.where_clause()
-    extra_where = f"AND {key_where}" if key_where else ""
+    filters = SqlWhereBuilder().add_auth(auth)
     rows = db.execute(
         f"""SELECT COALESCE(error_type, 'unknown') AS error_type,
                   COUNT(*) AS count
            FROM conversations
-           WHERE status != 'success' AND timestamp >= date('now', ?) {extra_where}
+           WHERE status != 'success' AND timestamp >= date('now', ?) {filters.and_sql}
            GROUP BY error_type
            ORDER BY count DESC LIMIT 15""",
-        [f"-{days} days"] + key_params,
+        [f"-{days} days"] + filters.params,
     ).fetchall()
     return [dict(r) for r in rows]

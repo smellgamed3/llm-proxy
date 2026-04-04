@@ -5,6 +5,7 @@ import sqlite3
 from fastapi import APIRouter, Depends
 
 from api.dependencies import get_analytics_db, resolve_auth, AuthContext
+from api.query import SqlWhereBuilder
 
 router = APIRouter(tags=["costs"])
 
@@ -17,26 +18,19 @@ def get_costs_summary(
     auth: AuthContext = Depends(resolve_auth),
 ) -> dict:
     """Return total cost summary, optionally filtered by date range."""
-    where = []
-    params = []
-    key_where, key_params = auth.where_clause()
-    if key_where:
-        where.append(key_where)
-        params.extend(key_params)
-    if date_from:
-        where.append("date(timestamp) >= ?")
-        params.append(date_from)
-    if date_to:
-        where.append("date(timestamp) <= ?")
-        params.append(date_to)
-    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+    filters = SqlWhereBuilder().add_auth(auth).add_date_range(
+        column="timestamp",
+        date_from=date_from,
+        date_to=date_to,
+        cast_to_date=True,
+    )
 
     row = db.execute(
         f"""SELECT SUM(COALESCE(cost_usd, 0)) AS total_cost_usd,
                    SUM(COALESCE(total_tokens, 0)) AS total_tokens,
                    COUNT(*) AS total_requests
-            FROM conversations {where_sql}""",
-        params,
+            FROM conversations {filters.where_sql}""",
+        filters.params,
     ).fetchone()
     return {
         "total_cost_usd": round(row["total_cost_usd"] or 0.0, 6),
@@ -53,28 +47,21 @@ def get_costs_by_model(
     auth: AuthContext = Depends(resolve_auth),
 ) -> list[dict]:
     """Return cost breakdown by model."""
-    where = []
-    params = []
-    key_where, key_params = auth.where_clause()
-    if key_where:
-        where.append(key_where)
-        params.extend(key_params)
-    if date_from:
-        where.append("date(timestamp) >= ?")
-        params.append(date_from)
-    if date_to:
-        where.append("date(timestamp) <= ?")
-        params.append(date_to)
-    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+    filters = SqlWhereBuilder().add_auth(auth).add_date_range(
+        column="timestamp",
+        date_from=date_from,
+        date_to=date_to,
+        cast_to_date=True,
+    )
 
     rows = db.execute(
         f"""SELECT model, SUM(COALESCE(cost_usd, 0)) AS cost_usd,
                    SUM(COALESCE(total_tokens, 0)) AS total_tokens,
                    COUNT(*) AS request_count
-            FROM conversations {where_sql}
+            FROM conversations {filters.where_sql}
             GROUP BY model
             ORDER BY cost_usd DESC""",
-        params,
+        filters.params,
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -86,7 +73,7 @@ def get_daily_costs(
     auth: AuthContext = Depends(resolve_auth),
 ) -> list[dict]:
     """Return daily cost trend."""
-    key_where, key_params = auth.where_clause()
+    filters = SqlWhereBuilder().add_auth(auth)
     if auth.is_admin:
         rows = db.execute(
             """SELECT date, SUM(total_cost_usd) AS cost_usd,
@@ -98,15 +85,14 @@ def get_daily_costs(
             (f"-{days} days",),
         ).fetchall()
     else:
-        extra_where = f"AND {key_where}" if key_where else ""
         rows = db.execute(
             f"""SELECT date(timestamp) AS date,
                        SUM(COALESCE(cost_usd, 0)) AS cost_usd,
                        SUM(COALESCE(total_tokens, 0)) AS total_tokens
                 FROM conversations
-                WHERE timestamp >= date('now', ?) {extra_where}
+                WHERE timestamp >= date('now', ?) {filters.and_sql}
                 GROUP BY date(timestamp)
                 ORDER BY date ASC""",
-            [f"-{days} days"] + key_params,
+            [f"-{days} days"] + filters.params,
         ).fetchall()
     return [dict(r) for r in rows]

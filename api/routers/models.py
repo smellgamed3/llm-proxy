@@ -5,6 +5,7 @@ import sqlite3
 from fastapi import APIRouter, Depends
 
 from api.dependencies import get_analytics_db, resolve_auth, AuthContext
+from api.query import SqlWhereBuilder
 
 router = APIRouter(tags=["models"])
 
@@ -17,17 +18,13 @@ def get_model_usage(
     auth: AuthContext = Depends(resolve_auth),
 ) -> list[dict]:
     """Return request count, token usage, and cost per model."""
-    key_where, key_params = auth.where_clause()
     if auth.is_admin:
-        where = []
-        params = []
-        if date_from:
-            where.append("date >= ?")
-            params.append(date_from)
-        if date_to:
-            where.append("date <= ?")
-            params.append(date_to)
-        where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+        filters = SqlWhereBuilder().add_date_range(
+            column="date",
+            date_from=date_from,
+            date_to=date_to,
+            cast_to_date=True,
+        )
         rows = db.execute(
             f"""SELECT model, provider,
                        SUM(request_count) AS request_count,
@@ -36,23 +33,18 @@ def get_model_usage(
                        SUM(total_tokens) AS total_tokens,
                        SUM(total_cost_usd) AS cost_usd,
                        AVG(avg_duration_ms) AS avg_duration_ms
-                FROM daily_stats {where_sql}
+                FROM daily_stats {filters.where_sql}
                 GROUP BY model, provider
                 ORDER BY request_count DESC""",
-            params,
+            filters.params,
         ).fetchall()
     else:
-        where = []
-        params = list(key_params)
-        if key_where:
-            where.append(key_where)
-        if date_from:
-            where.append("date(timestamp) >= ?")
-            params.append(date_from)
-        if date_to:
-            where.append("date(timestamp) <= ?")
-            params.append(date_to)
-        where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+        filters = SqlWhereBuilder().add_auth(auth).add_date_range(
+            column="timestamp",
+            date_from=date_from,
+            date_to=date_to,
+            cast_to_date=True,
+        )
         rows = db.execute(
             f"""SELECT COALESCE(model, 'unknown') AS model,
                        COALESCE(provider, 'unknown') AS provider,
@@ -62,10 +54,10 @@ def get_model_usage(
                        SUM(COALESCE(total_tokens, 0)) AS total_tokens,
                        SUM(COALESCE(cost_usd, 0)) AS cost_usd,
                        AVG(COALESCE(duration_ms, 0)) AS avg_duration_ms
-                FROM conversations {where_sql}
+                FROM conversations {filters.where_sql}
                 GROUP BY model, provider
                 ORDER BY request_count DESC""",
-            params,
+            filters.params,
         ).fetchall()
     return [dict(r) for r in rows]
 
@@ -76,10 +68,9 @@ def list_models(
     auth: AuthContext = Depends(resolve_auth),
 ) -> list[str]:
     """Return distinct model names seen in conversations."""
-    key_where, key_params = auth.where_clause()
-    extra_where = f"AND {key_where}" if key_where else ""
+    filters = SqlWhereBuilder().add_auth(auth)
     rows = db.execute(
-        f"SELECT DISTINCT model FROM conversations WHERE model IS NOT NULL {extra_where} ORDER BY model",
-        key_params,
+        f"SELECT DISTINCT model FROM conversations WHERE model IS NOT NULL {filters.and_sql} ORDER BY model",
+        filters.params,
     ).fetchall()
     return [r["model"] for r in rows]

@@ -61,9 +61,10 @@ class Config:
     def __post_init__(self):
         try:
             Path(self.log_dir).mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            import warnings
-            warnings.warn(f"Could not create log directory '{self.log_dir}': {e}")
+        except OSError:
+            # Config creation should not fail if the target path is not writable
+            # in the current environment (for example, local tests on /data).
+            pass
 
 
 def _parse_filter_rules(raw: list | None) -> List[FilterRule]:

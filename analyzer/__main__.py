@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import argparse
 import logging
-import sys
 
+from common.logging import configure_logging
 from .config import load_analyzer_config
 from .worker import AnalyzerWorker
 
@@ -19,10 +19,7 @@ def main() -> None:
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=getattr(logging, args.log_level.upper(), logging.INFO),
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
-    )
+    configure_logging(service_name="analyzer", level=args.log_level)
 
     config = load_analyzer_config()
     config.mode = args.mode
