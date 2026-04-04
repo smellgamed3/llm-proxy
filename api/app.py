@@ -2,23 +2,27 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from .routers import overview, conversations, costs, latency, prompts, models, errors, admin
+from .dependencies import verify_api_key
 
 
 def create_app() -> FastAPI:
     app = FastAPI(title="LLM Proxy Analytics API", version="0.2.1")
+    app.state.analyzer_sync_manager = admin.AnalyzerSyncManager()
 
-    app.include_router(overview.router, prefix="/api")
-    app.include_router(conversations.router, prefix="/api")
-    app.include_router(costs.router, prefix="/api")
-    app.include_router(latency.router, prefix="/api")
-    app.include_router(prompts.router, prefix="/api")
-    app.include_router(models.router, prefix="/api")
-    app.include_router(errors.router, prefix="/api")
-    app.include_router(admin.router, prefix="/api")
+    api_deps = [Depends(verify_api_key)]
+
+    app.include_router(overview.router, prefix="/api", dependencies=api_deps)
+    app.include_router(conversations.router, prefix="/api", dependencies=api_deps)
+    app.include_router(costs.router, prefix="/api", dependencies=api_deps)
+    app.include_router(latency.router, prefix="/api", dependencies=api_deps)
+    app.include_router(prompts.router, prefix="/api", dependencies=api_deps)
+    app.include_router(models.router, prefix="/api", dependencies=api_deps)
+    app.include_router(errors.router, prefix="/api", dependencies=api_deps)
+    app.include_router(admin.router, prefix="/api", dependencies=api_deps)
 
     # Serve static dashboard
     static_dir = Path(__file__).parent / "static"

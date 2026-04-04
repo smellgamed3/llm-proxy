@@ -70,7 +70,6 @@ class AnalyticsStore:
                 CREATE INDEX IF NOT EXISTS idx_conv_status ON conversations(status);
                 CREATE INDEX IF NOT EXISTS idx_conv_template ON conversations(template_id);
                 CREATE INDEX IF NOT EXISTS idx_conv_seq ON conversations(seq);
-                CREATE INDEX IF NOT EXISTS idx_conv_trace ON conversations(trace_id);
 
                 CREATE TABLE IF NOT EXISTS prompt_templates (
                     template_id         TEXT PRIMARY KEY,
@@ -105,6 +104,27 @@ class AnalyticsStore:
                     updated_at  TEXT DEFAULT (datetime('now'))
                 );
                 INSERT OR IGNORE INTO watermark (id, seq, processed) VALUES (1, 0, 0);
+
+                CREATE TABLE IF NOT EXISTS sync_jobs (
+                    job_id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    mode             TEXT NOT NULL,
+                    since            TEXT,
+                    until            TEXT,
+                    status           TEXT NOT NULL,
+                    progress         REAL DEFAULT 0.0,
+                    processed_rows   INTEGER DEFAULT 0,
+                    total_rows       INTEGER DEFAULT 0,
+                    remaining_rows   INTEGER DEFAULT 0,
+                    current_seq      INTEGER DEFAULT 0,
+                    target_seq       INTEGER DEFAULT 0,
+                    last_timestamp   TEXT,
+                    started_at       TEXT,
+                    finished_at      TEXT,
+                    error            TEXT,
+                    stop_requested   INTEGER DEFAULT 0,
+                    created_at       TEXT DEFAULT (datetime('now'))
+                );
+                CREATE INDEX IF NOT EXISTS idx_sync_jobs_started_at ON sync_jobs(started_at DESC);
             """)
             # Schema migrations for new columns
             self._migrate(conn)
@@ -128,10 +148,29 @@ class AnalyticsStore:
                 conn.execute(
                     f"ALTER TABLE conversations ADD COLUMN {col} {col_type}"
                 )
-        if "trace_id" not in existing:
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_conv_trace ON conversations(trace_id)"
-            )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_conv_trace ON conversations(trace_id)"
+        )
+
+        sync_job_existing = {
+            row[1] for row in conn.execute("PRAGMA table_info(sync_jobs)").fetchall()
+        }
+        sync_job_migrations = [
+            ("progress", "REAL DEFAULT 0.0"),
+            ("processed_rows", "INTEGER DEFAULT 0"),
+            ("total_rows", "INTEGER DEFAULT 0"),
+            ("remaining_rows", "INTEGER DEFAULT 0"),
+            ("current_seq", "INTEGER DEFAULT 0"),
+            ("target_seq", "INTEGER DEFAULT 0"),
+            ("last_timestamp", "TEXT"),
+            ("started_at", "TEXT"),
+            ("finished_at", "TEXT"),
+            ("error", "TEXT"),
+            ("stop_requested", "INTEGER DEFAULT 0"),
+        ]
+        for col, col_type in sync_job_migrations:
+            if col not in sync_job_existing:
+                conn.execute(f"ALTER TABLE sync_jobs ADD COLUMN {col} {col_type}")
 
     def get_watermark(self) -> int:
         with self._get_conn() as conn:
@@ -246,3 +285,61 @@ class AnalyticsStore:
                 "conversation_count": conv_count,
                 "template_count": template_count,
             }
+
+    def create_sync_job(
+        self,
+        *,
+        mode: str,
+        since: str | None,
+        until: str | None,
+        status: str,
+        started_at: str | None,
+    ) -> int:
+        with self._get_conn() as conn:
+            cursor = conn.execute(
+                """INSERT INTO sync_jobs (mode, since, until, status, started_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (mode, since, until, status, started_at),
+            )
+            return int(cursor.lastrowid)
+
+    def update_sync_job(self, job_id: int, **updates: object) -> None:
+        if not updates:
+            return
+        cols = []
+        values: list[object] = []
+        for key, value in updates.items():
+            cols.append(f"{key} = ?")
+            values.append(value)
+        values.append(job_id)
+        with self._get_conn() as conn:
+            conn.execute(
+                f"UPDATE sync_jobs SET {', '.join(cols)} WHERE job_id = ?",
+                values,
+            )
+
+    def list_sync_jobs(self, limit: int = 20) -> list[dict]:
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                """SELECT job_id, mode, since, until, status, progress,
+                          processed_rows, total_rows, remaining_rows,
+                          current_seq, target_seq, last_timestamp,
+                          started_at, finished_at, error, stop_requested
+                   FROM sync_jobs
+                   ORDER BY job_id DESC
+                   LIMIT ?""",
+                (limit,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def get_sync_job(self, job_id: int) -> dict | None:
+        with self._get_conn() as conn:
+            row = conn.execute(
+                """SELECT job_id, mode, since, until, status, progress,
+                          processed_rows, total_rows, remaining_rows,
+                          current_seq, target_seq, last_timestamp,
+                          started_at, finished_at, error, stop_requested
+                   FROM sync_jobs WHERE job_id = ?""",
+                (job_id,),
+            ).fetchone()
+            return dict(row) if row else None

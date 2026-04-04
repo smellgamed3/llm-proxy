@@ -2,15 +2,56 @@
 
 const API = '/api';
 
-async function fetchJSON(url) {
-  const r = await fetch(url);
+// ── Toast notification system ─────────────────────────────────────────────
+
+let _toastContainer = null;
+
+function _getToastContainer() {
+  if (!_toastContainer) {
+    _toastContainer = document.createElement('div');
+    _toastContainer.id = 'toast-container';
+    document.body.appendChild(_toastContainer);
+  }
+  return _toastContainer;
+}
+
+function showToast(message, type = 'info', duration = 4000) {
+  const container = _getToastContainer();
+  const toast = document.createElement('div');
+  toast.className = `toast toast-${type}`;
+  toast.textContent = message;
+  container.appendChild(toast);
+  // Trigger reflow then animate in
+  void toast.offsetWidth;
+  toast.classList.add('toast-visible');
+  setTimeout(() => {
+    toast.classList.remove('toast-visible');
+    toast.addEventListener('transitionend', () => toast.remove(), { once: true });
+  }, duration);
+}
+
+async function requestJSON(url, options = {}) {
+  const headers = { ...(options.headers || {}) };
+  if (options.body != null && !headers['Content-Type']) {
+    headers['Content-Type'] = 'application/json';
+  }
+  const r = await fetch(url, { ...options, headers });
   if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
   return r.json();
+}
+
+async function fetchJSON(url) {
+  return requestJSON(url);
 }
 
 function fmt(n, decimals = 0) {
   if (n == null) return '—';
   return Number(n).toLocaleString(undefined, { maximumFractionDigits: decimals });
+}
+
+function fmtPercent(value, decimals = 1) {
+  if (value == null) return '—';
+  return `${(Number(value) * 100).toFixed(decimals)}%`;
 }
 
 function escapeHtml(text) {
@@ -49,13 +90,15 @@ let overviewDays = 7;
 let trendChartInstance = null;
 let modelChartInstance = null;
 let tokenChartInstance = null;
+let overviewPollHandle = null;
 
 async function loadOverview() {
   try {
-    const [summary, daily, modelUsage] = await Promise.all([
+    const [summary, daily, modelUsage, adminStatus] = await Promise.all([
       fetchJSON(`${API}/overview`),
       fetchJSON(`${API}/overview/daily?days=${overviewDays}`),
       fetchJSON(`${API}/models/usage`),
+      fetchJSON(`${API}/admin/status`),
     ]);
 
     document.getElementById('total-requests').textContent = fmt(summary.total_requests);
@@ -71,8 +114,22 @@ async function loadOverview() {
     renderTrendChart(daily);
     renderOverviewModelChart(modelUsage);
     renderOverviewTokenChart(daily);
+    renderDatabaseObservability(adminStatus);
+    scheduleOverviewRefresh(adminStatus.worker);
   } catch (e) {
     console.error('Overview load error:', e);
+  }
+}
+
+function scheduleOverviewRefresh(worker) {
+  if (overviewPollHandle) {
+    clearTimeout(overviewPollHandle);
+    overviewPollHandle = null;
+  }
+  if (worker && worker.is_running) {
+    overviewPollHandle = setTimeout(() => {
+      loadOverview();
+    }, 2500);
   }
 }
 
@@ -177,6 +234,420 @@ function initOverviewTimeRange() {
       loadOverview();
     });
   });
+}
+
+function setIfPresent(id, value) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = value;
+}
+
+function statusClass(statusValue) {
+  switch (statusValue) {
+    case 'running':
+      return 'status-running';
+    case 'stopping':
+      return 'status-stopping';
+    case 'completed':
+      return 'status-completed';
+    case 'stopped':
+      return 'status-stopped';
+    case 'failed':
+      return 'status-failed';
+    default:
+      return 'status-idle';
+  }
+}
+
+function formatDateTime(value) {
+  if (!value) return '—';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString();
+}
+
+function renderMetricTable(targetId, rows) {
+  const tbody = document.getElementById(targetId);
+  if (!tbody) return;
+  tbody.innerHTML = rows.map(([label, value]) => `
+    <tr>
+      <th>${escapeHtml(label)}</th>
+      <td>${escapeHtml(String(value ?? '—'))}</td>
+    </tr>
+  `).join('');
+}
+
+function renderWorkerStatus(worker) {
+  if (!worker) return;
+  const pill = document.getElementById('worker-status-pill');
+  if (pill) {
+    pill.textContent = worker.status || 'idle';
+    pill.className = `status-pill ${statusClass(worker.status)}`;
+  }
+
+  const progressValue = worker.progress != null ? `${Math.round(Number(worker.progress) * 100)}%` : '0%';
+  setIfPresent('worker-progress-label', progressValue);
+  setIfPresent('worker-mode', worker.mode || '—');
+  setIfPresent('worker-processed', fmt(worker.processed_rows || 0));
+  setIfPresent('worker-total', fmt(worker.total_rows || 0));
+  setIfPresent('worker-remaining', fmt(worker.remaining_rows || 0));
+  setIfPresent('worker-current-seq', fmt(worker.current_seq || 0));
+  setIfPresent('worker-target-seq', fmt(worker.target_seq || 0));
+  setIfPresent('worker-last-timestamp', formatDateTime(worker.last_timestamp));
+  setIfPresent('worker-started-at', formatDateTime(worker.started_at));
+  setIfPresent('worker-finished-at', formatDateTime(worker.finished_at));
+
+  const bar = document.getElementById('worker-progress-bar');
+  if (bar) {
+    const width = worker.progress != null ? Math.max(4, Math.round(Number(worker.progress) * 100)) : 0;
+    bar.style.width = `${worker.total_rows > 0 || worker.is_running ? width : 0}%`;
+    bar.className = `progress-fill ${statusClass(worker.status)}`;
+  }
+
+  const error = document.getElementById('worker-error');
+  if (error) {
+    error.hidden = !worker.error;
+    error.textContent = worker.error || '';
+  }
+}
+
+function renderDatabaseObservability(status) {
+  if (!status) return;
+  const rawDb = status.raw_db || {};
+  const analyticsDb = status.analytics_db || {};
+  const worker = status.worker || {};
+
+  setIfPresent('obs-raw-total', fmt(rawDb.total_rows || 0));
+  setIfPresent('obs-raw-finalized', fmt(rawDb.finalized_rows || 0));
+  setIfPresent('obs-raw-backlog', fmt(rawDb.backlog_rows || 0));
+  setIfPresent('obs-analytics-conversations', fmt(analyticsDb.conversation_count || 0));
+  setIfPresent('obs-analytics-templates', fmt(analyticsDb.template_count || 0));
+  setIfPresent('obs-worker-status', worker.status || 'idle');
+
+  const obsWorkerStatus = document.getElementById('obs-worker-status');
+  if (obsWorkerStatus) {
+    obsWorkerStatus.className = `card-value card-value-status ${statusClass(worker.status)}`;
+  }
+
+  renderMetricTable('raw-db-metrics', [
+    ['Path', rawDb.path || '—'],
+    ['File Size', formatBytes(rawDb.file_size_bytes || 0)],
+    ['Finalized Rows', fmt(rawDb.finalized_rows || 0)],
+    ['Pending Rows', fmt(rawDb.pending_rows || 0)],
+    ['Backlog Rows', fmt(rawDb.backlog_rows || 0)],
+    ['Error Rows', fmt(rawDb.error_rows || 0)],
+    ['Latest Timestamp', formatDateTime(rawDb.last_timestamp)],
+    ['Avg Duration', rawDb.avg_duration_ms != null ? `${fmt(rawDb.avg_duration_ms, 1)} ms` : '—'],
+    ['Payload Volume', formatBytes(rawDb.payload_bytes || 0)],
+  ]);
+
+  renderMetricTable('analytics-db-metrics', [
+    ['Path', analyticsDb.path || '—'],
+    ['File Size', formatBytes(analyticsDb.file_size_bytes || 0)],
+    ['Conversations', fmt(analyticsDb.conversation_count || 0)],
+    ['Prompt Templates', fmt(analyticsDb.template_count || 0)],
+    ['Daily Stats Rows', fmt(analyticsDb.daily_stats_rows || 0)],
+    ['Watermark Seq', fmt(analyticsDb.watermark_seq || 0)],
+    ['Records Processed', fmt(analyticsDb.records_processed || 0)],
+    ['Last Sync', formatDateTime(analyticsDb.last_updated_at)],
+    ['Latest Analytics Timestamp', formatDateTime(analyticsDb.latest_conversation_timestamp)],
+  ]);
+
+  renderWorkerStatus(worker);
+}
+
+let analyzerPollHandle = null;
+let analyzerAutoRefresh = true;
+let _analyzerPrevStatus = null;
+
+function getAnalyzerRequestPayload(modeOverride) {
+  const mode = modeOverride || document.querySelector('[name="analyzer-mode"]:checked')?.value || 'incremental';
+  const since = document.getElementById('analyzer-since')?.value || null;
+  const until = document.getElementById('analyzer-until')?.value || null;
+  return {
+    mode,
+    since: since || null,
+    until: until || null,
+  };
+}
+
+function setAnalyzerNotice(message, variant = 'info') {
+  const notice = document.getElementById('analyzer-notice');
+  if (!notice) return;
+  notice.hidden = !message;
+  notice.textContent = message || '';
+  notice.className = `inline-notice ${variant}`;
+}
+
+function startAnalyzerPolling() {
+  if (!analyzerAutoRefresh || analyzerPollHandle) return;
+  analyzerPollHandle = setInterval(refreshAnalyzerStatus, 2000);
+}
+
+function stopAnalyzerPolling() {
+  if (!analyzerPollHandle) return;
+  clearInterval(analyzerPollHandle);
+  analyzerPollHandle = null;
+}
+
+function toDateTimeLocalValue(date) {
+  const local = new Date(date.getTime() - (date.getTimezoneOffset() * 60000));
+  return local.toISOString().slice(0, 16);
+}
+
+function applyAnalyzerRangePreset(hours) {
+  const until = new Date();
+  const since = new Date(until.getTime() - (hours * 60 * 60 * 1000));
+  const sinceInput = document.getElementById('analyzer-since');
+  const untilInput = document.getElementById('analyzer-until');
+  if (sinceInput) sinceInput.value = toDateTimeLocalValue(since);
+  if (untilInput) untilInput.value = toDateTimeLocalValue(until);
+  const rangeRadio = document.querySelector('[name="analyzer-mode"][value="range"]');
+  if (rangeRadio) rangeRadio.checked = true;
+}
+
+function clearAnalyzerRange() {
+  const sinceInput = document.getElementById('analyzer-since');
+  const untilInput = document.getElementById('analyzer-until');
+  if (sinceInput) sinceInput.value = '';
+  if (untilInput) untilInput.value = '';
+}
+
+function updateAnalyzerButtons(worker) {
+  const isRunning = !!worker?.is_running;
+  document.querySelectorAll('[data-sync-mode]').forEach((button) => {
+    button.disabled = isRunning;
+  });
+  const stopButton = document.getElementById('analyzer-stop-btn');
+  if (stopButton) {
+    stopButton.disabled = !isRunning;
+  }
+}
+
+function renderAnalyzerHistory(history) {
+  const tbody = document.getElementById('analyzer-history-tbody');
+  if (!tbody) return;
+  if (!history || history.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="8" class="muted">No sync history yet.</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = history.map((row) => {
+    const windowText = row.since || row.until
+      ? `${row.since || '—'} -> ${row.until || 'now'}`
+      : '—';
+    const processed = `${fmt(row.processed_rows || 0)} / ${fmt(row.total_rows || 0)}`;
+    const retryable = row.status === 'failed' || row.status === 'stopped';
+    const actionCell = retryable
+      ? `<button type="button" class="ghost-action retry-btn" data-job-id="${row.job_id}">Retry</button>`
+      : '';
+    return `
+      <tr>
+        <td>#${row.job_id}</td>
+        <td><span class="status-pill ${statusClass(row.status)}">${escapeHtml(row.status || 'idle')}</span></td>
+        <td>${escapeHtml(row.mode || '—')}</td>
+        <td>${escapeHtml(processed)}</td>
+        <td>${escapeHtml(windowText)}</td>
+        <td>${escapeHtml(formatDateTime(row.started_at))}</td>
+        <td>${escapeHtml(formatDateTime(row.finished_at))}</td>
+        <td>${actionCell}</td>
+      </tr>
+    `;
+  }).join('');
+}
+
+async function refreshAnalyzerStatus() {
+  try {
+    const [status, history] = await Promise.all([
+      fetchJSON(`${API}/admin/status`),
+      fetchJSON(`${API}/admin/analyzer/history?limit=15`),
+    ]);
+    renderDatabaseObservability(status);
+    renderAnalyzerHistory(history);
+    updateAnalyzerButtons(status.worker);
+
+    // Detect terminal status transitions and emit toast
+    const newStatus = status.worker?.status;
+    if (_analyzerPrevStatus && _analyzerPrevStatus !== newStatus) {
+      const wasActive = _analyzerPrevStatus === 'running' || _analyzerPrevStatus === 'stopping';
+      if (wasActive) {
+        const jobId = status.worker?.job_id ? ` #${status.worker.job_id}` : '';
+        const processed = status.worker?.processed_rows != null ? ` (${fmt(status.worker.processed_rows)} rows)` : '';
+        if (newStatus === 'completed') {
+          showToast(`同步任务${jobId} 已完成${processed}`, 'success');
+        } else if (newStatus === 'failed') {
+          showToast(`同步任务${jobId} 失败：${status.worker.error || '未知错误'}`, 'error', 7000);
+        } else if (newStatus === 'stopped') {
+          showToast(`同步任务${jobId} 已停止${processed}`, 'info');
+        }
+      }
+    }
+    _analyzerPrevStatus = newStatus;
+
+    if (status.worker && !status.worker.is_running) {
+      stopAnalyzerPolling();
+    }
+  } catch (e) {
+    console.error('Analyzer status load error:', e);
+    setAnalyzerNotice(`状态刷新失败: ${e.message}`, 'error');
+  }
+}
+
+async function startAnalyzerSync(modeOverride) {
+  const payload = getAnalyzerRequestPayload(modeOverride);
+  if ((payload.since || payload.until) && payload.mode !== 'range') {
+    payload.mode = 'range';
+  }
+
+  try {
+    const response = await requestJSON(`${API}/admin/analyzer/sync`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    showToast(`已启动 ${response.job.mode || payload.mode} 同步任务 #${response.job.job_id || '—'}`, 'success');
+    setAnalyzerNotice('');
+    await refreshAnalyzerStatus();
+    startAnalyzerPolling();
+  } catch (e) {
+    console.error('Analyzer sync start error:', e);
+    showToast(`启动同步失败: ${e.message}`, 'error');
+    setAnalyzerNotice(`启动失败: ${e.message}`, 'error');
+  }
+}
+
+async function stopAnalyzerSync() {
+  try {
+    const response = await requestJSON(`${API}/admin/analyzer/stop`, {
+      method: 'POST',
+    });
+    showToast(`正在停止任务 #${response.job.job_id || '—'}`, 'info');
+    setAnalyzerNotice('');
+    await refreshAnalyzerStatus();
+    startAnalyzerPolling();
+  } catch (e) {
+    console.error('Analyzer sync stop error:', e);
+    showToast(`停止失败: ${e.message}`, 'error');
+    setAnalyzerNotice(`停止失败: ${e.message}`, 'error');
+  }
+}
+
+async function retryAnalyzerSync(jobId) {
+  try {
+    const response = await requestJSON(`${API}/admin/analyzer/retry/${jobId}`, {
+      method: 'POST',
+    });
+    showToast(`已重试任务 #${jobId}，新任务 #${response.job.job_id || '—'}`, 'success');
+    setAnalyzerNotice('');
+    await refreshAnalyzerStatus();
+    startAnalyzerPolling();
+  } catch (e) {
+    console.error('Analyzer sync retry error:', e);
+    showToast(`重试失败: ${e.message}`, 'error');
+  }
+}
+
+function bindAnalyzerControls() {
+  document.querySelectorAll('[data-sync-mode]').forEach((button) => {
+    button.addEventListener('click', () => {
+      startAnalyzerSync(button.dataset.syncMode || 'incremental');
+    });
+  });
+  document.querySelectorAll('[data-range-hours]').forEach((button) => {
+    button.addEventListener('click', () => {
+      applyAnalyzerRangePreset(Number(button.dataset.rangeHours || 0));
+    });
+  });
+  document.querySelectorAll('[data-range-clear]').forEach((button) => {
+    button.addEventListener('click', () => {
+      clearAnalyzerRange();
+    });
+  });
+  const stopButton = document.getElementById('analyzer-stop-btn');
+  if (stopButton) {
+    stopButton.addEventListener('click', () => {
+      stopAnalyzerSync();
+    });
+  }
+  const refreshToggle = document.getElementById('analyzer-auto-refresh');
+  if (refreshToggle) {
+    analyzerAutoRefresh = refreshToggle.checked;
+    refreshToggle.addEventListener('change', () => {
+      analyzerAutoRefresh = refreshToggle.checked;
+      if (analyzerAutoRefresh) {
+        const currentStatus = document.getElementById('worker-status-pill')?.textContent;
+        if (currentStatus === 'running' || currentStatus === 'stopping') {
+          startAnalyzerPolling();
+        }
+      } else {
+        stopAnalyzerPolling();
+      }
+    });
+  }
+  // Event delegation for retry buttons rendered inside the history tbody
+  const historyTbody = document.getElementById('analyzer-history-tbody');
+  if (historyTbody) {
+    historyTbody.addEventListener('click', (evt) => {
+      const btn = evt.target.closest('.retry-btn');
+      if (btn) retryAnalyzerSync(Number(btn.dataset.jobId));
+    });
+  }
+  // Backup button
+  const backupBtn = document.getElementById('backup-create-btn');
+  if (backupBtn) {
+    backupBtn.addEventListener('click', triggerBackup);
+  }
+}
+
+// ── Backup helpers ────────────────────────────────────────────────────────
+
+function renderBackupList(backups) {
+  const tbody = document.getElementById('backup-list-tbody');
+  if (!tbody) return;
+  if (!backups || backups.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="3" class="muted">No backups found.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = backups.map((b) => `
+    <tr>
+      <td>${escapeHtml(b.name)}</td>
+      <td>${formatBytes(b.size_bytes)}</td>
+      <td>${escapeHtml(formatDateTime(b.modified_at))}</td>
+    </tr>
+  `).join('');
+}
+
+async function loadBackupList() {
+  try {
+    const backups = await fetchJSON(`${API}/admin/backups`);
+    renderBackupList(backups);
+  } catch (e) {
+    console.error('Failed to load backups:', e);
+  }
+}
+
+async function triggerBackup() {
+  const btn = document.getElementById('backup-create-btn');
+  if (btn) btn.disabled = true;
+  try {
+    const result = await requestJSON(`${API}/admin/backup`, { method: 'POST' });
+    const count = result.files?.length ?? 0;
+    showToast(`备份完成：创建了 ${count} 个文件`, 'success');
+    await loadBackupList();
+  } catch (e) {
+    console.error('Backup failed:', e);
+    showToast(`备份失败: ${e.message}`, 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function loadAnalyzerPage() {
+  bindAnalyzerControls();
+  await refreshAnalyzerStatus();
+  await loadBackupList();
+  const currentStatus = document.getElementById('worker-status-pill')?.textContent;
+  if ((currentStatus === 'running' || currentStatus === 'stopping') && analyzerAutoRefresh) {
+    startAnalyzerPolling();
+  }
 }
 
 // ── Conversations page ────────────────────────────────────────────────────
@@ -1681,12 +2152,25 @@ function renderPagination(total, page, pageSize) {
 
 // ── Costs page ────────────────────────────────────────────────────────────
 
-async function loadCostsPage() {
+let costsDays = 30;
+let dailyCostChartInstance = null;
+
+function _dateFromDays(days) {
+  const d = new Date();
+  d.setDate(d.getDate() - (days - 1));
+  return d.toISOString().slice(0, 10);
+}
+
+async function loadCostsPage(days) {
+  if (days != null) costsDays = days;
+  const date_from = _dateFromDays(costsDays);
+  const title = document.getElementById('daily-cost-chart-title');
+  if (title) title.textContent = `Daily Cost (${costsDays} days)`;
   try {
     const [summary, daily, byModel] = await Promise.all([
-      fetchJSON(`${API}/costs/summary`),
-      fetchJSON(`${API}/costs/daily?days=30`),
-      fetchJSON(`${API}/costs/by-model`),
+      fetchJSON(`${API}/costs/summary?date_from=${date_from}`),
+      fetchJSON(`${API}/costs/daily?days=${costsDays}`),
+      fetchJSON(`${API}/costs/by-model?date_from=${date_from}`),
     ]);
 
     const summaryEl = document.getElementById('cost-summary');
@@ -1700,7 +2184,8 @@ async function loadCostsPage() {
 
     const ctx = document.getElementById('daily-cost-chart');
     if (ctx) {
-      new Chart(ctx, {
+      if (dailyCostChartInstance) dailyCostChartInstance.destroy();
+      dailyCostChartInstance = new Chart(ctx, {
         type: 'line',
         data: {
           labels: daily.map(d => d.date),
@@ -1731,6 +2216,16 @@ async function loadCostsPage() {
   } catch (e) {
     console.error('Costs load error:', e);
   }
+}
+
+function initCostsTimeRange() {
+  document.querySelectorAll('.range-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      loadCostsPage(parseInt(btn.dataset.range, 10));
+    });
+  });
 }
 
 // ── Prompts page ──────────────────────────────────────────────────────────
@@ -1978,11 +2473,19 @@ function renderChatBubbles(container, messages, fallbackAssistant) {
 
 // ── Latency page ──────────────────────────────────────────────────────────
 
-async function loadLatencyPage() {
+let latencyDays = 30;
+let latencyTrendChartInstance = null;
+let latencyModelChartInstance = null;
+let latencyDistChartInstance = null;
+
+async function loadLatencyPage(days) {
+  if (days != null) latencyDays = days;
+  const titleEl = document.getElementById('latency-trend-title');
+  if (titleEl) titleEl.textContent = `Daily Latency Trend (${latencyDays} days)`;
   try {
     const [summary, daily, byModel, dist] = await Promise.all([
       fetchJSON(`${API}/latency/summary`),
-      fetchJSON(`${API}/latency/daily?days=30`),
+      fetchJSON(`${API}/latency/daily?days=${latencyDays}`),
       fetchJSON(`${API}/latency/by-model`),
       fetchJSON(`${API}/latency/distribution`),
     ]);
@@ -1997,7 +2500,8 @@ async function loadLatencyPage() {
     // Daily trend
     const trendCtx = document.getElementById('latency-trend-chart');
     if (trendCtx) {
-      new Chart(trendCtx, {
+      if (latencyTrendChartInstance) latencyTrendChartInstance.destroy();
+      latencyTrendChartInstance = new Chart(trendCtx, {
         type: 'line',
         data: {
           labels: daily.map(d => d.date),
@@ -2018,7 +2522,8 @@ async function loadLatencyPage() {
     const modelCtx = document.getElementById('latency-by-model-chart');
     if (modelCtx) {
       const sorted = byModel.slice().sort((a, b) => (b.avg_ms || 0) - (a.avg_ms || 0));
-      new Chart(modelCtx, {
+      if (latencyModelChartInstance) latencyModelChartInstance.destroy();
+      latencyModelChartInstance = new Chart(modelCtx, {
         type: 'bar',
         data: {
           labels: sorted.map(m => m.model || 'unknown'),
@@ -2038,7 +2543,8 @@ async function loadLatencyPage() {
     // Distribution histogram
     const distCtx = document.getElementById('latency-dist-chart');
     if (distCtx) {
-      new Chart(distCtx, {
+      if (latencyDistChartInstance) latencyDistChartInstance.destroy();
+      latencyDistChartInstance = new Chart(distCtx, {
         type: 'bar',
         data: {
           labels: dist.map(d => d.bucket),
@@ -2066,6 +2572,16 @@ async function loadLatencyPage() {
   } catch (e) {
     console.error('Latency load error:', e);
   }
+}
+
+function initLatencyTimeRange() {
+  document.querySelectorAll('.range-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      loadLatencyPage(parseInt(btn.dataset.range, 10));
+    });
+  });
 }
 
 // ── Rating & Tags ─────────────────────────────────────────────────────────
@@ -2134,9 +2650,15 @@ function exportConversations(format) {
 
 // ── Models page ───────────────────────────────────────────────────────────
 
-async function loadModelsPage() {
+let modelsDays = 30;
+let modelDistChartInstance = null;
+let modelCostDistChartInstance = null;
+
+async function loadModelsPage(days) {
+  if (days != null) modelsDays = days;
+  const date_from = _dateFromDays(modelsDays);
   try {
-    const usage = await fetchJSON(`${API}/models/usage`);
+    const usage = await fetchJSON(`${API}/models/usage?date_from=${date_from}`);
 
     const colors = [
       '#4f46e5', '#0ea5e9', '#10b981', '#f59e0b', '#ef4444',
@@ -2146,7 +2668,8 @@ async function loadModelsPage() {
     // Request distribution doughnut
     const distCtx = document.getElementById('model-dist-chart');
     if (distCtx) {
-      new Chart(distCtx, {
+      if (modelDistChartInstance) modelDistChartInstance.destroy();
+      modelDistChartInstance = new Chart(distCtx, {
         type: 'doughnut',
         data: {
           labels: usage.map(m => m.model || 'unknown'),
@@ -2165,7 +2688,8 @@ async function loadModelsPage() {
     // Cost distribution doughnut
     const costCtx = document.getElementById('model-cost-dist-chart');
     if (costCtx) {
-      new Chart(costCtx, {
+      if (modelCostDistChartInstance) modelCostDistChartInstance.destroy();
+      modelCostDistChartInstance = new Chart(costCtx, {
         type: 'doughnut',
         data: {
           labels: usage.map(m => m.model || 'unknown'),
@@ -2207,6 +2731,16 @@ async function loadModelsPage() {
   }
 }
 
+function initModelsTimeRange() {
+  document.querySelectorAll('.range-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      loadModelsPage(parseInt(btn.dataset.range, 10));
+    });
+  });
+}
+
 // ── Auto-detect page ──────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -2214,6 +2748,25 @@ document.addEventListener('DOMContentLoaded', () => {
   if (path === '/' || path.endsWith('index.html')) {
     initOverviewTimeRange();
     loadOverview();
+  }
+
+  if (path.endsWith('costs.html')) {
+    initCostsTimeRange();
+    loadCostsPage();
+  }
+
+  if (path.endsWith('latency.html')) {
+    initLatencyTimeRange();
+    loadLatencyPage();
+  }
+
+  if (path.endsWith('models.html')) {
+    initModelsTimeRange();
+    loadModelsPage();
+  }
+
+  if (path.endsWith('analyzer.html')) {
+    loadAnalyzerPage();
   }
 
   const tbody = document.getElementById('conv-tbody');

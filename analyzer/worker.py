@@ -4,9 +4,7 @@ import json
 import logging
 import sqlite3
 import time
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Iterator
+from typing import Any, Callable
 
 from .body_reader import BodyReader
 from .config import AnalyzerConfig
@@ -24,8 +22,15 @@ logger = logging.getLogger("analyzer.worker")
 class AnalyzerWorker:
     """Main worker that reads from raw.db and writes to analytics.db."""
 
-    def __init__(self, config: AnalyzerConfig):
+    def __init__(
+        self,
+        config: AnalyzerConfig,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        stop_requested: Callable[[], bool] | None = None,
+    ):
         self.config = config
+        self.progress_callback = progress_callback
+        self.stop_requested = stop_requested
         self.analytics_store = AnalyticsStore(config.analytics_db)
         self.body_reader = BodyReader(config.bodies_dir)
         self.fingerprinter = Fingerprinter()
@@ -73,27 +78,122 @@ class AnalyzerWorker:
     def _process_available(self, start_seq: int) -> dict[str, int]:
         seq = start_seq
         processed_total = 0
+        until = self.config.until if self.config.mode == "range" else None
+        workload = self._describe_workload(start_seq, until=until)
+        self._emit_progress(
+            processed_rows=0,
+            total_rows=workload["total_rows"],
+            current_seq=seq,
+            target_seq=workload["target_seq"],
+            last_timestamp=None,
+        )
         while True:
-            batch = self._fetch_batch(seq, until=self.config.until if self.config.mode == "range" else None)
+            if self._should_stop():
+                logger.info("Analyzer stop requested before fetching next batch")
+                return {
+                    "processed": processed_total,
+                    "last_seq": seq,
+                    "total_rows": workload["total_rows"],
+                    "target_seq": workload["target_seq"],
+                    "stopped": True,
+                }
+            batch = self._fetch_batch(seq, until=until)
             if not batch:
                 logger.info("No more records to process. Exiting.")
-                return {"processed": processed_total, "last_seq": seq}
+                self._emit_progress(
+                    processed_rows=processed_total,
+                    total_rows=workload["total_rows"],
+                    current_seq=seq,
+                    target_seq=workload["target_seq"],
+                    last_timestamp=None,
+                )
+                return {
+                    "processed": processed_total,
+                    "last_seq": seq,
+                    "total_rows": workload["total_rows"],
+                    "target_seq": workload["target_seq"],
+                    "stopped": False,
+                }
 
             seq, processed = self._process_batch(batch, seq)
             processed_total += processed
+            self._emit_progress(
+                processed_rows=processed_total,
+                total_rows=workload["total_rows"],
+                current_seq=seq,
+                target_seq=workload["target_seq"],
+                last_timestamp=batch[-1].get("timestamp"),
+            )
+
+    def _describe_workload(self, start_seq: int, until: str | None = None) -> dict[str, int]:
+        try:
+            conn = sqlite3.connect(self.config.raw_db, timeout=10)
+            conn.row_factory = sqlite3.Row
+            query = (
+                "SELECT COUNT(*) AS total_rows, MAX(seq) AS target_seq "
+                "FROM raw_requests WHERE seq > ? AND status_code IS NOT NULL"
+            )
+            params: list[object] = [start_seq]
+            if until:
+                query += " AND timestamp <= ?"
+                params.append(until)
+            row = conn.execute(query, params).fetchone()
+            conn.close()
+            return {
+                "total_rows": int(row["total_rows"] or 0) if row else 0,
+                "target_seq": int(row["target_seq"] or start_seq) if row else start_seq,
+            }
+        except Exception as e:
+            logger.warning("Failed to describe workload: %s", e)
+            return {"total_rows": 0, "target_seq": start_seq}
+
+    def _emit_progress(
+        self,
+        *,
+        processed_rows: int,
+        total_rows: int,
+        current_seq: int,
+        target_seq: int,
+        last_timestamp: str | None,
+    ) -> None:
+        if self.progress_callback is None:
+            return
+        self.progress_callback(
+            {
+                "processed_rows": processed_rows,
+                "total_rows": total_rows,
+                "current_seq": current_seq,
+                "target_seq": target_seq,
+                "last_timestamp": last_timestamp,
+            }
+        )
+
+    def _should_stop(self) -> bool:
+        if self.stop_requested is None:
+            return False
+        try:
+            return bool(self.stop_requested())
+        except Exception:
+            return False
 
     def _process_batch(self, batch: list[dict], current_seq: int) -> tuple[int, int]:
         seq = current_seq
         dates_to_refresh: set[str] = set()
+        processed = 0
         for record in batch:
+            if self._should_stop():
+                logger.info("Analyzer stop requested during batch at seq %s", seq)
+                break
             try:
                 self._process_record(record, dates_to_refresh)
                 seq = record["seq"]
+                processed += 1
             except Exception as e:
                 logger.error("Error processing record %s: %s", record.get("id"), e, exc_info=True)
                 seq = record["seq"]
+                processed += 1
 
-        self.analytics_store.set_watermark(seq, len(batch))
+        self.analytics_store.set_watermark(seq, processed)
 
         for date in dates_to_refresh:
             try:
@@ -101,7 +201,7 @@ class AnalyzerWorker:
             except Exception as e:
                 logger.warning("Failed to refresh daily stats for %s: %s", date, e)
 
-        return seq, len(batch)
+        return seq, processed
 
     def _fetch_batch(self, after_seq: int, until: str | None = None) -> list[dict]:
         try:

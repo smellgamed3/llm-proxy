@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import time
 from pathlib import Path
 
 import pytest
@@ -10,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from api.app import create_app
 from analyzer.store import AnalyticsStore
+from analyzer.worker import AnalyzerWorker
 
 
 @pytest.fixture
@@ -76,6 +79,9 @@ def test_admin_status_alias(client: TestClient):
     response = client.get("/api/admin/analyzer/status")
     assert response.status_code == 200
     assert "watermark_seq" in response.json()
+    assert "raw_db" in response.json()
+    assert "analytics_db" in response.json()
+    assert "worker" in response.json()
 
 
 def test_admin_status_at_legacy_path(client: TestClient):
@@ -94,6 +100,69 @@ def test_admin_rerun_incremental(client: TestClient):
     assert data["status"] == "completed"
     assert data["mode"] == "incremental"
     assert data["processed"] == 1
+
+
+def test_admin_start_background_sync(client: TestClient):
+    response = client.post("/api/admin/analyzer/sync", json={"mode": "incremental"})
+    assert response.status_code == 202
+    data = response.json()
+    assert data["status"] == "started"
+    assert data["job"]["mode"] == "incremental"
+
+    job = client.get("/api/admin/analyzer/job")
+    assert job.status_code == 200
+    assert "status" in job.json()
+
+    history = client.get("/api/admin/analyzer/history")
+    assert history.status_code == 200
+    assert isinstance(history.json(), list)
+    assert history.json()[0]["mode"] == "incremental"
+
+
+def test_admin_stop_background_sync(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    raw_db = os.environ["RAW_DB"]
+    conn = sqlite3.connect(raw_db)
+    for idx in range(2, 10):
+        conn.execute(
+            """INSERT INTO raw_requests (id, seq, timestamp, method, path, status_code, duration_ms)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (f"raw-{idx}", idx, f"2024-01-01T00:00:{idx:02d}Z", "POST", "/v1/chat/completions", 200, 15.0),
+        )
+    conn.commit()
+    conn.close()
+
+    original_process_record = AnalyzerWorker._process_record
+
+    def slow_process_record(self, record, dates_to_refresh):
+        time.sleep(0.03)
+        return original_process_record(self, record, dates_to_refresh)
+
+    monkeypatch.setattr(AnalyzerWorker, "_process_record", slow_process_record)
+
+    response = client.post("/api/admin/analyzer/sync", json={"mode": "incremental"})
+    assert response.status_code == 202
+
+    stop_response = client.post("/api/admin/analyzer/stop")
+    assert stop_response.status_code == 200
+    assert stop_response.json()["status"] == "stopping"
+
+    deadline = time.time() + 3
+    final_job = None
+    while time.time() < deadline:
+      final_job = client.get("/api/admin/analyzer/job")
+      data = final_job.json()
+      if data["status"] in {"stopped", "completed", "failed"}:
+          break
+      time.sleep(0.05)
+
+    assert final_job is not None
+    data = final_job.json()
+    assert data["status"] == "stopped"
+    assert data["stop_requested"] is True
+
+    history = client.get("/api/admin/analyzer/history").json()
+    assert history[0]["status"] == "stopped"
+    assert history[0]["stop_requested"] == 1
 
 
 def test_admin_rerun_full(client: TestClient):
@@ -117,3 +186,67 @@ def test_admin_reset(client: TestClient):
 
     status_after = client.get("/api/admin/analyzer/status").json()
     assert status_after["conversation_count"] == 0
+
+
+def test_admin_retry_sync_job(client: TestClient):
+    # Start a sync so we have a job in history
+    response = client.post("/api/admin/analyzer/sync", json={"mode": "incremental"})
+    assert response.status_code == 202
+    job_id = response.json()["job"]["job_id"]
+
+    # Wait for it to finish
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        job = client.get("/api/admin/analyzer/job").json()
+        if not job.get("is_running"):
+            break
+        time.sleep(0.05)
+
+    # Retry the completed job
+    retry_resp = client.post(f"/api/admin/analyzer/retry/{job_id}")
+    assert retry_resp.status_code == 202
+    data = retry_resp.json()
+    assert data["status"] == "started"
+    assert data["job"]["mode"] == "incremental"
+    # Should be a new job id
+    assert data["job"]["job_id"] != job_id
+
+
+def test_admin_retry_unknown_job(client: TestClient):
+    resp = client.post("/api/admin/analyzer/retry/99999")
+    assert resp.status_code == 404
+
+
+def test_admin_backup_and_list(client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    backup_dir = tmp_path / "backups"
+    monkeypatch.setenv("BACKUP_DIR", str(backup_dir))
+
+    # Source files don't exist in tmp_path by default for analytics/raw; backup should skip them gracefully
+    resp = client.post("/api/admin/backup")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "timestamp" in data
+    assert isinstance(data["files"], list)
+
+    # List backups — should return a list (may be empty if no source files existed)
+    list_resp = client.get("/api/admin/backups")
+    assert list_resp.status_code == 200
+    assert isinstance(list_resp.json(), list)
+
+
+def test_admin_backup_creates_files(client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """When analytics.db exists, backup creates a copy in BACKUP_DIR."""
+    analytics_db = Path(os.environ["ANALYTICS_DB"])
+    backup_dir = tmp_path / "backups"
+    monkeypatch.setenv("BACKUP_DIR", str(backup_dir))
+
+    resp = client.post("/api/admin/backup")
+    assert resp.status_code == 200
+    data = resp.json()
+    # analytics.db should be backed up (raw.db may not exist in this fixture)
+    assert any("analytics" in f["name"] for f in data["files"])
+
+    # File should exist on disk
+    ts = data["timestamp"]
+    backup_file = backup_dir / f"analytics_{ts}.db"
+    assert backup_file.exists()
