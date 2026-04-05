@@ -46,7 +46,7 @@ services:
 
   api:
     image: ghcr.io/smellgamed3/llm-proxy-api:${APP_VERSION:-1.1.0}
-    pull_policy: never
+    pull_policy: always
     container_name: llm-analytics-api-prod
     restart: unless-stopped
     ports:
