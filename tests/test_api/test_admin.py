@@ -93,6 +93,55 @@ def test_admin_status_at_legacy_path(client: TestClient):
     assert "template_count" in data
 
 
+def test_admin_list_raw_requests(client: TestClient):
+    response = client.get("/api/admin/raw-requests")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 1
+    assert len(data["items"]) == 1
+    assert data["items"][0]["id"] == "raw-1"
+
+
+def test_admin_get_raw_request_with_rehydrated_bodies(
+    client: TestClient,
+):
+    bodies_dir = Path(os.environ["BODIES_DIR"])
+    bodies_dir.mkdir(parents=True, exist_ok=True)
+    shard_path = bodies_dir / "2024-01-01-00.jsonl"
+    request_ref = "raw-1:request"
+    response_ref = "raw-1:response"
+
+    request_line = json.dumps({"ref": request_ref, "timestamp": "2024-01-01T00:00:00Z", "data": "request body"}) + "\n"
+    response_line = json.dumps({"ref": response_ref, "timestamp": "2024-01-01T00:00:01Z", "data": "response body"}) + "\n"
+    with open(shard_path, "wb") as handle:
+        handle.write(request_line.encode("utf-8"))
+        request_offset = 0
+        response_offset = handle.tell()
+        handle.write(response_line.encode("utf-8"))
+
+    (bodies_dir / "manifest.jsonl").write_text(
+        json.dumps({"ref": request_ref, "file": shard_path.name, "offset": request_offset, "length": len(request_line.encode("utf-8"))}) + "\n"
+        + json.dumps({"ref": response_ref, "file": shard_path.name, "offset": response_offset, "length": len(response_line.encode("utf-8"))}) + "\n",
+        encoding="utf-8",
+    )
+
+    raw_db = Path(os.environ["RAW_DB"])
+    conn = sqlite3.connect(raw_db)
+    conn.execute(
+        "UPDATE raw_requests SET request_body_ref = ?, response_body_ref = ?, request_headers = ?, response_headers = ? WHERE id = ?",
+        (request_ref, response_ref, json.dumps({"content-type": "application/json"}), json.dumps({"x-upstream": "mock"}), "raw-1"),
+    )
+    conn.commit()
+    conn.close()
+
+    response = client.get("/api/admin/raw-requests/raw-1")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["request_body"] == "request body"
+    assert data["response_body"] == "response body"
+    assert json.loads(data["request_headers"])["content-type"] == "application/json"
+
+
 def test_admin_rerun_incremental(client: TestClient):
     response = client.post("/api/admin/analyzer/rerun", json={"mode": "incremental"})
     assert response.status_code == 200

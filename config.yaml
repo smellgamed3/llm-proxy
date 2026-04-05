@@ -21,7 +21,8 @@ preserve_host: true
 #   - A plain string: prefix match (e.g. "/v1/chat" matches "/v1/chat/completions")
 #   - An object with "pattern" and "regex: true": full regex match
 recording:
-  include: []
+  include:
+    - "/v1/"
     # Examples (prefix match):
     # - "/v1/chat/completions"
     # - "/v1/embeddings"

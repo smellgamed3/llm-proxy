@@ -12,9 +12,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 
 from analyzer.config import load_analyzer_config
+from analyzer.body_reader import BodyReader
 from analyzer.worker import AnalyzerWorker
 from analyzer.store import AnalyticsStore
-from api.dependencies import get_analytics_db, get_raw_db, resolve_auth, AuthContext
+from api.dependencies import get_analytics_db, get_bodies_dir, get_raw_db, resolve_auth, AuthContext
 
 router = APIRouter(tags=["admin"])
 
@@ -344,6 +345,95 @@ def get_status(
     """Return analytics system status."""
     _require_admin(auth)
     return _build_status(analytics_db, raw_db, sync_manager)
+
+
+@router.get("/admin/raw-requests")
+def list_raw_requests(
+    page: int = 1,
+    page_size: int = 50,
+    method: str | None = None,
+    path_prefix: str | None = None,
+    status: str | None = None,
+    q: str | None = None,
+    raw_db: sqlite3.Connection = Depends(get_raw_db),
+    auth: AuthContext = Depends(resolve_auth),
+) -> dict[str, Any]:
+    _require_admin(auth)
+
+    safe_page = max(page, 1)
+    safe_page_size = min(max(page_size, 1), 200)
+    offset = (safe_page - 1) * safe_page_size
+
+    clauses: list[str] = []
+    params: list[Any] = []
+
+    if method:
+        clauses.append("method = ?")
+        params.append(method.upper())
+    if path_prefix:
+        clauses.append("path LIKE ?")
+        params.append(f"{path_prefix}%")
+    if status == "pending":
+        clauses.append("status_code IS NULL")
+    elif status == "error":
+        clauses.append("(status_code >= 400 OR error IS NOT NULL)")
+    elif status == "success":
+        clauses.append("status_code IS NOT NULL AND status_code < 400 AND (error IS NULL OR error = '')")
+    elif status == "stream":
+        clauses.append("is_stream = 1")
+    if q:
+        like_q = f"%{q}%"
+        clauses.append("(id LIKE ? OR path LIKE ? OR query_string LIKE ? OR error LIKE ?)")
+        params.extend([like_q, like_q, like_q, like_q])
+
+    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    total = raw_db.execute(
+        f"SELECT COUNT(*) FROM raw_requests {where_sql}",
+        params,
+    ).fetchone()[0]
+
+    rows = raw_db.execute(
+        f"""SELECT id, seq, timestamp, method, path, query_string,
+                  status_code, is_stream, duration_ms, error,
+                  request_body_size, response_body_size,
+                  request_body_ref, response_body_ref
+           FROM raw_requests {where_sql}
+           ORDER BY seq DESC
+           LIMIT ? OFFSET ?""",
+        params + [safe_page_size, offset],
+    ).fetchall()
+
+    return {
+        "total": total,
+        "page": safe_page,
+        "page_size": safe_page_size,
+        "items": [dict(row) for row in rows],
+    }
+
+
+@router.get("/admin/raw-requests/{request_id}")
+def get_raw_request(
+    request_id: str,
+    raw_db: sqlite3.Connection = Depends(get_raw_db),
+    bodies_dir: str = Depends(get_bodies_dir),
+    auth: AuthContext = Depends(resolve_auth),
+) -> dict[str, Any]:
+    _require_admin(auth)
+
+    row = raw_db.execute(
+        "SELECT * FROM raw_requests WHERE id = ?",
+        (request_id,),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Raw request not found")
+
+    data = dict(row)
+    body_reader = BodyReader(bodies_dir)
+    if data.get("request_body_ref"):
+        data["request_body"] = body_reader.read(data["request_body_ref"])
+    if data.get("response_body_ref"):
+        data["response_body"] = body_reader.read(data["response_body_ref"])
+    return data
 
 
 @router.get("/admin/analyzer/job")

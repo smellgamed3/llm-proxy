@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Raw Logs — LLM Proxy Analytics</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body class="app-layout">
+  <main class="app-content">
+    <h1>Raw Logs</h1>
+
+    <section class="filters filters-advanced">
+      <input type="text" id="raw-q" placeholder="Search id/path/error..." />
+      <select id="raw-method-filter">
+        <option value="">Method: all</option>
+        <option value="POST">POST</option>
+        <option value="GET">GET</option>
+        <option value="PUT">PUT</option>
+        <option value="DELETE">DELETE</option>
+        <option value="PATCH">PATCH</option>
+      </select>
+      <input type="text" id="raw-path-prefix-filter" placeholder="Path prefix" value="/v1/" />
+      <select id="raw-status-filter">
+        <option value="">Status: all</option>
+        <option value="success">success</option>
+        <option value="error">error</option>
+        <option value="pending">pending</option>
+        <option value="stream">stream</option>
+      </select>
+      <select id="raw-page-size-filter">
+        <option value="25">25 / page</option>
+        <option value="50" selected>50 / page</option>
+        <option value="100">100 / page</option>
+      </select>
+      <button type="button" onclick="loadRawLogsPage(1)">Apply</button>
+      <button type="button" class="ghost-btn" onclick="resetRawLogFilters()">Reset</button>
+    </section>
+
+    <section class="cards conversation-insights">
+      <div class="card">
+        <div class="card-value" id="raw-insight-loaded">0</div>
+        <div class="card-label">Loaded Rows</div>
+      </div>
+      <div class="card">
+        <div class="card-value" id="raw-insight-success">0</div>
+        <div class="card-label">Success</div>
+      </div>
+      <div class="card">
+        <div class="card-value" id="raw-insight-error">0</div>
+        <div class="card-label">Error</div>
+      </div>
+      <div class="card">
+        <div class="card-value" id="raw-insight-pending">0</div>
+        <div class="card-label">Pending</div>
+      </div>
+    </section>
+
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Timestamp</th>
+          <th>Seq</th>
+          <th>Method</th>
+          <th>Path</th>
+          <th>Result</th>
+          <th>HTTP</th>
+          <th>Latency (ms)</th>
+          <th>Error / Body Size</th>
+        </tr>
+      </thead>
+      <tbody id="raw-logs-tbody"></tbody>
+    </table>
+
+    <div class="pagination" id="raw-pagination"></div>
+
+    <div class="modal-overlay" id="raw-log-modal-overlay" hidden>
+      <div class="modal-dialog">
+        <div class="modal-header">
+          <h2>原始请求 / 返回日志</h2>
+          <button type="button" class="modal-close" onclick="hideRawLogDetail()">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="detail-meta" id="raw-log-detail-meta"></div>
+          <div class="detail-grid">
+            <div>
+              <h3>Query String</h3>
+              <pre id="raw-log-query-string"></pre>
+            </div>
+            <div>
+              <h3>Error</h3>
+              <pre id="raw-log-error"></pre>
+            </div>
+          </div>
+          <div class="detail-grid two-column-raw">
+            <div>
+              <h3>Request Headers</h3>
+              <div class="detail-actions"><button data-copy-target="raw-log-request-headers">Copy</button></div>
+              <pre id="raw-log-request-headers"></pre>
+              <h3 class="subheading">Request Body</h3>
+              <div class="detail-actions"><button data-copy-target="raw-log-request-body">Copy</button></div>
+              <pre id="raw-log-request-body"></pre>
+            </div>
+            <div>
+              <h3>Response Headers</h3>
+              <div class="detail-actions"><button data-copy-target="raw-log-response-headers">Copy</button></div>
+              <pre id="raw-log-response-headers"></pre>
+              <h3 class="subheading">Response Body</h3>
+              <div class="detail-actions"><button data-copy-target="raw-log-response-body">Copy</button></div>
+              <pre id="raw-log-response-body"></pre>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

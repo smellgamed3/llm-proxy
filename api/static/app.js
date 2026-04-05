@@ -1,7 +1,7 @@
 // LLM Proxy Analytics Dashboard — app.js
 
 const API = '/api';
-const APP_VERSION = 'v1.3.1';
+const APP_VERSION = 'v1.4.0';
 
 const NAV_GROUPS = [
   {
@@ -48,6 +48,12 @@ const NAV_GROUPS = [
         label: 'Analyzer',
         icon: '<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h12v12H3z"/><path d="M6 11V7m3 4V5m3 6V8"/></svg>',
       },
+      {
+        href: '/raw-logs.html',
+        label: 'Raw Logs',
+        adminOnly: true,
+        icon: '<svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 3.5h10a1 1 0 011 1v9a1 1 0 01-1 1H4a1 1 0 01-1-1v-9a1 1 0 011-1z"/><path d="M6 6.5h6M6 9h6M6 11.5h4"/></svg>',
+      },
     ],
   },
   {
@@ -71,8 +77,44 @@ function renderAppShell() {
   const main = document.querySelector('main.app-content');
   if (!main) return;
 
+  const shell = document.createRange().createContextualFragment(`
+    <header class="app-header">
+      <div class="header-brand">
+        <span class="brand">LLM Proxy Analytics</span>
+        <span class="header-version">${APP_VERSION}</span>
+      </div>
+      <div class="header-actions">
+        <button id="theme-toggle" class="theme-toggle" type="button" onclick="toggleTheme()"></button>
+        <div id="key-manager" class="key-manager"></div>
+      </div>
+    </header>
+    <aside class="app-sidebar">
+      <nav class="sidebar-nav">${buildNavMarkup()}</nav>
+    </aside>
+  `);
+  document.body.insertBefore(shell, main);
+}
+
+// ── API Key Hash Management ───────────────────────────────────────────────
+
+const KEY_STORAGE_KEY = 'llm_proxy_key_hashes';
+const THEME_STORAGE_KEY = 'llm_proxy_theme';
+
+let keyManagerExpanded = false;
+let adminAccessState = { signature: '', isAdmin: false, checked: false };
+
+function getVisibleNavGroups() {
+  return NAV_GROUPS
+    .map(group => ({
+      ...group,
+      items: group.items.filter(item => !item.adminOnly || adminAccessState.isAdmin),
+    }))
+    .filter(group => group.items.length > 0);
+}
+
+function buildNavMarkup() {
   const currentPath = normalizePagePath(window.location.pathname);
-  const navMarkup = NAV_GROUPS.map(group => {
+  return getVisibleNavGroups().map(group => {
     const items = group.items.map(item => {
       const isActive = currentPath === (item.match || item.href);
       return `
@@ -88,31 +130,13 @@ function renderAppShell() {
         ${items}
       </div>`;
   }).join('');
-
-  const shell = document.createRange().createContextualFragment(`
-    <header class="app-header">
-      <div class="header-brand">
-        <span class="brand">LLM Proxy Analytics</span>
-        <span class="header-version">${APP_VERSION}</span>
-      </div>
-      <div class="header-actions">
-        <button id="theme-toggle" class="theme-toggle" type="button" onclick="toggleTheme()"></button>
-        <div id="key-manager" class="key-manager"></div>
-      </div>
-    </header>
-    <aside class="app-sidebar">
-      <nav class="sidebar-nav">${navMarkup}</nav>
-    </aside>
-  `);
-  document.body.insertBefore(shell, main);
 }
 
-// ── API Key Hash Management ───────────────────────────────────────────────
-
-const KEY_STORAGE_KEY = 'llm_proxy_key_hashes';
-const THEME_STORAGE_KEY = 'llm_proxy_theme';
-
-let keyManagerExpanded = false;
+function renderSidebarNav() {
+  const nav = document.querySelector('.sidebar-nav');
+  if (!nav) return;
+  nav.innerHTML = buildNavMarkup();
+}
 
 function formatHashPreview(hash) {
   if (!hash) return '—';
@@ -450,6 +474,29 @@ async function fetchOptionalJSON(url, allowedStatuses = [403]) {
   }
 }
 
+async function refreshAdminAccessState({ force = false } = {}) {
+  const activeHashes = getActiveKeyHashes();
+  const signature = activeHashes.slice().sort().join(',');
+  if (!activeHashes.length) {
+    const changed = adminAccessState.isAdmin || adminAccessState.checked;
+    adminAccessState = { signature: '', isAdmin: false, checked: false };
+    if (changed) renderSidebarNav();
+    return false;
+  }
+  if (!force && adminAccessState.checked && adminAccessState.signature === signature) {
+    return adminAccessState.isAdmin;
+  }
+
+  const adminStatus = await fetchOptionalJSON(`${API}/admin/status`);
+  const isAdmin = Boolean(adminStatus);
+  const changed = !adminAccessState.checked
+    || adminAccessState.signature !== signature
+    || adminAccessState.isAdmin !== isAdmin;
+  adminAccessState = { signature, isAdmin, checked: true };
+  if (changed) renderSidebarNav();
+  return isAdmin;
+}
+
 function fmt(n, decimals = 0) {
   if (n == null) return '—';
   return Number(n).toLocaleString(undefined, { maximumFractionDigits: decimals });
@@ -506,6 +553,13 @@ async function loadOverview() {
       fetchJSON(`${API}/models/usage`),
       fetchOptionalJSON(`${API}/admin/status`),
     ]);
+
+    adminAccessState = {
+      signature: getActiveKeyHashes().slice().sort().join(','),
+      isAdmin: Boolean(adminStatus),
+      checked: true,
+    };
+    renderSidebarNav();
 
     document.getElementById('total-requests').textContent = fmt(summary.total_requests);
     document.getElementById('success-rate').textContent =
@@ -1336,6 +1390,195 @@ function promptOptimizationHints(detail) {
     hints.push('未发现明显异常，可继续按模型、模板、时段进行横向对比优化。');
   }
   return hints;
+}
+
+// ── Raw Logs page ────────────────────────────────────────────────────────
+
+let currentRawLogsPage = 1;
+let selectedRawLogId = null;
+
+function collectRawLogFilters() {
+  const params = new URLSearchParams();
+  params.set('page', String(currentRawLogsPage));
+  params.set('page_size', document.getElementById('raw-page-size-filter')?.value || '50');
+
+  const mappings = [
+    ['raw-q', 'q'],
+    ['raw-method-filter', 'method'],
+    ['raw-path-prefix-filter', 'path_prefix'],
+    ['raw-status-filter', 'status'],
+  ];
+  mappings.forEach(([id, key]) => {
+    const value = document.getElementById(id)?.value;
+    if (value) params.set(key, value);
+  });
+  return params;
+}
+
+function resetRawLogFilters() {
+  ['raw-q', 'raw-method-filter', 'raw-path-prefix-filter', 'raw-status-filter', 'raw-page-size-filter']
+    .forEach((id) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      if (id === 'raw-page-size-filter') el.value = '50';
+      else if (id === 'raw-path-prefix-filter') el.value = '/v1/';
+      else el.value = '';
+    });
+  loadRawLogsPage(1);
+}
+
+function renderRawLogsRestricted() {
+  setIfPresent('raw-insight-loaded', 'Restricted');
+  setIfPresent('raw-insight-success', 'Admin only');
+  setIfPresent('raw-insight-error', 'Admin only');
+  setIfPresent('raw-insight-pending', 'Admin only');
+  const pagination = document.getElementById('raw-pagination');
+  if (pagination) pagination.innerHTML = '';
+  const tbody = document.getElementById('raw-logs-tbody');
+  if (tbody) {
+    tbody.innerHTML = '<tr><td colspan="8" class="muted">Admin only: 激活 admin key/hash 后可查看原始请求与返回日志。</td></tr>';
+  }
+}
+
+function renderRawLogStatus(row) {
+  if (row.status_code == null) return '<span class="badge badge-warning">pending</span>';
+  if (row.error || Number(row.status_code) >= 400) return '<span class="badge badge-error">error</span>';
+  return '<span class="badge badge-success">success</span>';
+}
+
+function formatRawPayloadSize(row) {
+  const reqSize = row.request_body_size != null ? fmt(row.request_body_size) : '—';
+  const respSize = row.response_body_size != null ? fmt(row.response_body_size) : '—';
+  return `${reqSize} / ${respSize}`;
+}
+
+function renderRawLogPagination(total, page, pageSize) {
+  const el = document.getElementById('raw-pagination');
+  if (!el) return;
+  const pages = Math.ceil(total / pageSize);
+  el.innerHTML = '';
+  for (let i = 1; i <= Math.min(pages, 20); i += 1) {
+    const btn = document.createElement('button');
+    btn.textContent = i;
+    if (i === page) btn.classList.add('active');
+    btn.onclick = () => loadRawLogsPage(i);
+    el.appendChild(btn);
+  }
+}
+
+function updateRawLogInsights(items) {
+  const loaded = items.length;
+  const success = items.filter(item => item.status_code != null && Number(item.status_code) < 400 && !item.error).length;
+  const error = items.filter(item => item.error || Number(item.status_code || 0) >= 400).length;
+  const pending = items.filter(item => item.status_code == null).length;
+  setIfPresent('raw-insight-loaded', fmt(loaded));
+  setIfPresent('raw-insight-success', fmt(success));
+  setIfPresent('raw-insight-error', fmt(error));
+  setIfPresent('raw-insight-pending', fmt(pending));
+}
+
+function formatPossiblyJson(value) {
+  if (value == null || value === '') return '—';
+  if (typeof value === 'string') {
+    try {
+      return JSON.stringify(JSON.parse(value), null, 2);
+    } catch {
+      return value;
+    }
+  }
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function hideRawLogDetail() {
+  selectedRawLogId = null;
+  const overlay = document.getElementById('raw-log-modal-overlay');
+  if (overlay) overlay.hidden = true;
+  document.body.style.overflow = '';
+  document.querySelectorAll('.raw-log-row').forEach((row) => row.classList.remove('selected'));
+}
+
+async function showRawLogDetail(requestId) {
+  selectedRawLogId = requestId;
+  try {
+    const detail = await fetchJSON(`${API}/admin/raw-requests/${requestId}`);
+    const overlay = document.getElementById('raw-log-modal-overlay');
+    if (!overlay) return;
+
+    const meta = document.getElementById('raw-log-detail-meta');
+    if (meta) {
+      meta.innerHTML = [
+        detail.id,
+        detail.method || '—',
+        detail.path || '—',
+        detail.status_code != null ? `HTTP ${detail.status_code}` : 'pending',
+        detail.duration_ms != null ? `${fmt(detail.duration_ms, 1)} ms` : '—',
+        detail.is_stream ? 'stream' : 'non-stream',
+      ].map(value => `<span>${escapeHtml(String(value))}</span>`).join('');
+    }
+
+    const queryEl = document.getElementById('raw-log-query-string');
+    if (queryEl) queryEl.textContent = detail.query_string || '—';
+    const reqHeadersEl = document.getElementById('raw-log-request-headers');
+    if (reqHeadersEl) reqHeadersEl.textContent = formatPossiblyJson(detail.request_headers);
+    const reqBodyEl = document.getElementById('raw-log-request-body');
+    if (reqBodyEl) reqBodyEl.textContent = formatPossiblyJson(detail.request_body);
+    const respHeadersEl = document.getElementById('raw-log-response-headers');
+    if (respHeadersEl) respHeadersEl.textContent = formatPossiblyJson(detail.response_headers);
+    const respBodyEl = document.getElementById('raw-log-response-body');
+    if (respBodyEl) respBodyEl.textContent = formatPossiblyJson(detail.response_body);
+    const errorEl = document.getElementById('raw-log-error');
+    if (errorEl) errorEl.textContent = detail.error || '—';
+
+    overlay.hidden = false;
+    document.body.style.overflow = 'hidden';
+    document.querySelectorAll('.raw-log-row').forEach((row) => {
+      row.classList.toggle('selected', row.dataset.requestId === requestId);
+    });
+  } catch (e) {
+    console.error('Raw log detail error:', e);
+  }
+}
+
+async function loadRawLogsPage(page) {
+  currentRawLogsPage = page || 1;
+  try {
+    const isAdmin = await refreshAdminAccessState({ force: true });
+    if (!isAdmin) {
+      renderRawLogsRestricted();
+      return;
+    }
+
+    const params = collectRawLogFilters();
+    const data = await fetchJSON(`${API}/admin/raw-requests?${params}`);
+    const items = data.items || [];
+    updateRawLogInsights(items);
+
+    const tbody = document.getElementById('raw-logs-tbody');
+    if (!tbody) return;
+    tbody.innerHTML = items.map(row => `
+      <tr class="conversation-row raw-log-row${selectedRawLogId === row.id ? ' selected' : ''}" data-request-id="${row.id}">
+        <td>${row.timestamp ? row.timestamp.replace('T', ' ').slice(0, 19) : '—'}</td>
+        <td>${fmt(row.seq)}</td>
+        <td>${row.method || '—'}</td>
+        <td title="${escapeHtml(row.path || '')}">${escapeHtml(truncateText(row.path || '—', 48))}</td>
+        <td>${renderRawLogStatus(row)}</td>
+        <td>${row.status_code != null ? row.status_code : '—'}</td>
+        <td>${row.duration_ms != null ? fmt(row.duration_ms, 1) : '—'}</td>
+        <td title="${escapeHtml(row.error || '')}">${escapeHtml(truncateText(row.error || formatRawPayloadSize(row), 44) || '—')}</td>
+      </tr>
+    `).join('');
+    tbody.querySelectorAll('.raw-log-row').forEach((row) => {
+      row.addEventListener('click', () => showRawLogDetail(row.dataset.requestId));
+    });
+    renderRawLogPagination(data.total, data.page, data.page_size);
+  } catch (e) {
+    console.error('Raw logs load error:', e);
+    renderRawLogsRestricted();
+  }
 }
 
 function updateConversationInsights(items) {
@@ -3262,6 +3505,7 @@ function getCurrentPageLoader() {
   const path = window.location.pathname;
   if (path === '/' || path.endsWith('index.html')) return () => loadOverview();
   if (path.endsWith('analyzer.html')) return () => loadAnalyzerPage();
+  if (path.endsWith('raw-logs.html')) return () => loadRawLogsPage(1);
   if (path.endsWith('costs.html')) return () => loadCostsPage();
   if (path.endsWith('latency.html')) return () => loadLatencyPage();
   if (path.endsWith('models.html')) return () => loadModelsPage();
@@ -3436,6 +3680,7 @@ async function submitKey() {
   closeKeyModal();
   keyManagerExpanded = true;
   renderKeyManager();
+  await refreshAdminAccessState({ force: true });
   if (result.status === 'added') {
     showToast('已新增 hash: ' + formatHashPreview(hash), 'success');
   } else {
@@ -3460,6 +3705,7 @@ async function toggleKeyActive(hash, active) {
   setKeyHashActive(hash, active);
   keyManagerExpanded = true;
   renderKeyManager();
+  await refreshAdminAccessState({ force: true });
   if (getActiveKeyHashes().length === 0) {
     showToast('当前没有激活的 hash，请先启用至少一个', 'warning');
     reloadPageToEmptyState();
@@ -3472,6 +3718,7 @@ async function setAllKeysActive(active) {
   setAllKeyHashesActive(active);
   keyManagerExpanded = true;
   renderKeyManager();
+  await refreshAdminAccessState({ force: true });
   if (!active) {
     showToast('已停用全部 hash', 'warning');
     reloadPageToEmptyState();
@@ -3485,6 +3732,7 @@ async function removeKey(hash) {
   removeKeyHash(hash);
   keyManagerExpanded = true;
   renderKeyManager();
+  await refreshAdminAccessState({ force: true });
   showToast('Key 已移除', 'info');
   if (getActiveKeyHashes().length === 0) {
     reloadPageToEmptyState();
@@ -3530,6 +3778,8 @@ document.addEventListener('DOMContentLoaded', () => {
     keyManagerExpanded = true;
     renderKeyManager();
     showToast('当前没有激活的 hash，请先启用至少一个', 'warning');
+  } else {
+    refreshAdminAccessState().catch((error) => console.error('Admin access detect error:', error));
   }
 
   const path = window.location.pathname;
@@ -3557,26 +3807,47 @@ document.addEventListener('DOMContentLoaded', () => {
     loadAnalyzerPage();
   }
 
-  const tbody = document.getElementById('conv-tbody');
-  if (tbody) {
-    const q = document.getElementById('q');
-    if (q) {
-      q.addEventListener('keydown', (evt) => {
-        if (evt.key === 'Enter') loadConversations(1);
-      });
+  if (path.endsWith('raw-logs.html')) {
+    loadRawLogsPage(1);
+  }
+
+  const q = document.getElementById('q');
+  if (q) {
+    q.addEventListener('keydown', (evt) => {
+      if (evt.key === 'Enter') loadConversations(1);
+    });
+  }
+
+  const rawQ = document.getElementById('raw-q');
+  if (rawQ) {
+    rawQ.addEventListener('keydown', (evt) => {
+      if (evt.key === 'Enter') loadRawLogsPage(1);
+    });
+  }
+
+  document.body.addEventListener('click', async (evt) => {
+    const btn = evt.target.closest('[data-copy-target]');
+    if (!btn) return;
+    const targetId = btn.getAttribute('data-copy-target');
+    if (!targetId) return;
+    try {
+      await copyDetailField(targetId);
+      btn.textContent = 'Copied';
+      setTimeout(() => { btn.textContent = 'Copy'; }, 1200);
+    } catch (e) {
+      console.error('Copy failed:', e);
     }
-    document.body.addEventListener('click', async (evt) => {
-      const btn = evt.target.closest('[data-copy-target]');
-      if (!btn) return;
-      const targetId = btn.getAttribute('data-copy-target');
-      if (!targetId) return;
-      try {
-        await copyDetailField(targetId);
-        btn.textContent = 'Copied';
-        setTimeout(() => { btn.textContent = 'Copy'; }, 1200);
-      } catch (e) {
-        console.error('Copy failed:', e);
+  });
+
+  const rawOverlay = document.getElementById('raw-log-modal-overlay');
+  if (rawOverlay) {
+    document.addEventListener('keydown', (evt) => {
+      if (evt.key === 'Escape' && !rawOverlay.hidden) {
+        hideRawLogDetail();
       }
+    });
+    rawOverlay.addEventListener('click', (evt) => {
+      if (evt.target === evt.currentTarget) hideRawLogDetail();
     });
   }
 

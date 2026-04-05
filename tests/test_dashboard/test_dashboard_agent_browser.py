@@ -528,6 +528,79 @@ def _build_handler(state: DashboardMockState):
                 )
                 return
 
+            if parsed.path == "/api/admin/raw-requests":
+                if not is_admin:
+                    _json_response(self, HTTPStatus.FORBIDDEN, {"detail": "Admin access required"})
+                    return
+                _json_response(
+                    self,
+                    HTTPStatus.OK,
+                    {
+                        "total": 2,
+                        "page": 1,
+                        "page_size": 50,
+                        "items": [
+                            {
+                                "id": "raw-1",
+                                "seq": 1001,
+                                "timestamp": "2026-04-05T10:20:30Z",
+                                "method": "POST",
+                                "path": "/v1/chat/completions",
+                                "status_code": 200,
+                                "is_stream": 0,
+                                "duration_ms": 320.5,
+                                "error": None,
+                                "request_body_size": 256,
+                                "response_body_size": 384,
+                                "request_body_ref": "raw-1:request",
+                                "response_body_ref": "raw-1:response",
+                            },
+                            {
+                                "id": "raw-2",
+                                "seq": 1000,
+                                "timestamp": "2026-04-05T10:10:00Z",
+                                "method": "POST",
+                                "path": "/v1/chat/completions",
+                                "status_code": 504,
+                                "is_stream": 0,
+                                "duration_ms": 15000,
+                                "error": "upstream timeout",
+                                "request_body_size": 128,
+                                "response_body_size": 64,
+                                "request_body_ref": "raw-2:request",
+                                "response_body_ref": "raw-2:response",
+                            },
+                        ],
+                    },
+                )
+                return
+
+            if parsed.path == "/api/admin/raw-requests/raw-1":
+                if not is_admin:
+                    _json_response(self, HTTPStatus.FORBIDDEN, {"detail": "Admin access required"})
+                    return
+                _json_response(
+                    self,
+                    HTTPStatus.OK,
+                    {
+                        "id": "raw-1",
+                        "seq": 1001,
+                        "timestamp": "2026-04-05T10:20:30Z",
+                        "method": "POST",
+                        "path": "/v1/chat/completions",
+                        "query_string": "trace_id=abc123",
+                        "status_code": 200,
+                        "is_stream": 0,
+                        "duration_ms": 320.5,
+                        "error": None,
+                        "request_headers": json.dumps({"content-type": "application/json"}),
+                        "response_headers": json.dumps({"content-type": "application/json"}),
+                        "request_body": json.dumps({"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "Summarize the deployment plan"}]}),
+                        "response_body": json.dumps({"id": "chatcmpl-1", "choices": [{"message": {"role": "assistant", "content": "Done."}}]}),
+                    },
+                )
+                return
+
             if parsed.path == "/api/admin/analyzer/history":
                 if not is_admin:
                     _json_response(self, HTTPStatus.FORBIDDEN, {"detail": "Admin access required"})
@@ -983,6 +1056,42 @@ def test_latency_page_renders_cards_and_table_with_agent_browser(
         assert state.latest_hashes("/api/latency/daily") == [SCOPED_HASH]
         assert state.latest_hashes("/api/latency/by-model") == [SCOPED_HASH]
         assert state.latest_hashes("/api/latency/distribution") == [SCOPED_HASH]
+    finally:
+        browser.close()
+
+
+@pytest.mark.skipif(shutil.which("agent-browser") is None, reason="agent-browser CLI is required")
+def test_raw_logs_nav_hidden_for_scoped_auth_with_agent_browser(
+    dashboard_server: tuple[str, DashboardMockState],
+) -> None:
+    base_url, _ = dashboard_server
+    browser = AgentBrowser()
+
+    try:
+                _open_seeded_page(browser, base_url, "/")
+                _wait_until(lambda: _expect_eval(browser, "document.querySelector('a[href=\"/raw-logs.html\"]') ? 'yes' : 'no'", "no"))
+    finally:
+                browser.close()
+
+
+@pytest.mark.skipif(shutil.which("agent-browser") is None, reason="agent-browser CLI is required")
+def test_raw_logs_page_renders_for_admin_with_agent_browser(
+    dashboard_server: tuple[str, DashboardMockState],
+) -> None:
+    base_url, state = dashboard_server
+    browser = AgentBrowser()
+
+    try:
+        _open_admin_page(browser, base_url, "/raw-logs.html")
+
+        _wait_until(lambda: _expect_eval(browser, "document.querySelector('a[href=\"/raw-logs.html\"]') ? 'yes' : 'no'", "yes"))
+        _wait_until(lambda: _expect_count(browser, "#raw-logs-tbody tr", 2))
+        _wait_until(lambda: _expect_text(browser, "#raw-insight-success", "1"))
+        browser.run("click", "#raw-logs-tbody tr:first-child")
+        _wait_until(lambda: _expect_eval(browser, 'String(document.getElementById("raw-log-modal-overlay").hidden)', "false"))
+        _wait_until(lambda: _expect_eval(browser, 'document.getElementById("raw-log-request-body").textContent.includes("deployment plan") ? "yes" : "no"', "yes"))
+        assert state.latest_hashes("/api/admin/raw-requests") == [ADMIN_HASH]
+        assert state.latest_hashes("/api/admin/raw-requests/raw-1") == [ADMIN_HASH]
     finally:
         browser.close()
 
