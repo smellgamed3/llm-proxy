@@ -3566,7 +3566,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   document.addEventListener('click', (evt) => {
     const manager = document.getElementById('key-manager');
-    if (!keyManagerExpanded || !manager || manager.contains(evt.target)) return;
+    if (!keyManagerExpanded || !manager) return;
+    // composedPath() 捕获事件派发时的原始路径，防止 renderKeyManager() 重渲染后
+    // evt.target 已不在 DOM 中导致误判为「外部点击」从而立刻关闭弹窗
+    if (evt.composedPath().includes(manager)) return;
     setKeyManagerExpanded(false);
   });
 });
