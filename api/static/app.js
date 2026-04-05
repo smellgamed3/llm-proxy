@@ -3494,11 +3494,27 @@ async function removeKey(hash) {
 }
 
 async function copyHash(hash) {
+  // 优先用 Clipboard API；降级到 execCommand（兼容 Playwright / 受限 iframe）
+  let ok = false;
   try {
     await navigator.clipboard.writeText(hash);
-    showToast('Hash 已复制到剪贴板', 'success', 2000);
+    ok = true;
   } catch {
-    showToast('复制失败', 'error');
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = hash;
+      ta.style.cssText = 'position:fixed;top:-9999px;left:-9999px;opacity:0';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+    } catch { /* ignore */ }
+  }
+  if (ok) {
+    showToast('Hash 已复制到剪贴板', 'success', 2000);
+  } else {
+    showToast('复制失败，请手动复制：' + hash, 'error', 6000);
   }
 }
 

@@ -747,6 +747,74 @@ def _open_admin_page(browser: AgentBrowser, base_url: str, page_path: str) -> No
 
 
 @pytest.mark.skipif(shutil.which("agent-browser") is None, reason="agent-browser CLI is required")
+def test_key_manager_trigger_click_opens_popover(
+    dashboard_server: tuple[str, DashboardMockState],
+) -> None:
+    """回归测试：点击 Key 管理按钮必须真正展开弹窗（不被 document click 监听器误关）。
+
+    之前的 bug：renderKeyManager() 重渲染后 evt.target 已离开 DOM，
+    document click 监听器误判为「外部点击」立即调用 setKeyManagerExpanded(false)。
+    修复方案：改用 evt.composedPath() 检测触发路径是否在 #key-manager 内。
+    """
+    base_url, _ = dashboard_server
+    browser = AgentBrowser()
+
+    try:
+        _open_seeded_page(browser, base_url, "/")
+        browser.run("open", f"{base_url}/")
+        _wait_until(lambda: _expect_eval(
+            browser,
+            'document.querySelector(".key-manager-trigger") ? "found" : "not found"',
+            "found",
+        ))
+        # 直接点击按钮（而非 eval 注入），复现之前的 composedPath bug 场景
+        browser.run("click", ".key-manager-trigger")
+        _wait_until(lambda: _expect_eval(
+            browser,
+            # 弹窗不含 hidden 属性即为可见
+            'String(document.querySelector(".key-manager-popover")?.hidden ?? "missing")',
+            "false",
+        ))
+    finally:
+        browser.close()
+
+
+@pytest.mark.skipif(shutil.which("agent-browser") is None, reason="agent-browser CLI is required")
+def test_key_manager_copy_hash_button(
+    dashboard_server: tuple[str, DashboardMockState],
+) -> None:
+    """回归测试：复制按钮点击后显示成功 toast（clipboard API 或 execCommand 降级）。"""
+    base_url, _ = dashboard_server
+    browser = AgentBrowser()
+
+    try:
+        _open_seeded_page(browser, base_url, "/")
+        browser.run("open", f"{base_url}/")
+        _wait_until(lambda: _expect_eval(
+            browser,
+            'document.querySelector(".key-manager-trigger") ? "found" : "not found"',
+            "found",
+        ))
+        browser.run("eval", "setKeyManagerExpanded(true)")
+        _wait_until(lambda: _expect_eval(
+            browser,
+            'String(document.querySelector(".key-manager-popover")?.hidden ?? "missing")',
+            "false",
+        ))
+        browser.run("click", ".key-item-btn[onclick^='copyHash']")
+        # 成功 toast 出现在 DOM 中（不含"失败"字样）
+        _wait_until(lambda: _expect_eval(
+            browser,
+            'document.querySelector("#toast-container .toast-success") ? "ok" : "no-toast"',
+            "ok",
+        ))
+        toast_text = browser.run("eval", 'document.querySelector("#toast-container .toast-success")?.textContent ?? ""')
+        assert "失败" not in _normalize_scalar(toast_text)
+    finally:
+        browser.close()
+
+
+@pytest.mark.skipif(shutil.which("agent-browser") is None, reason="agent-browser CLI is required")
 def test_dashboard_key_manager_theme_and_admin_scope_with_agent_browser(
     dashboard_server: tuple[str, DashboardMockState],
 ) -> None:
