@@ -53,6 +53,77 @@
 - 请求配置：temperature/max_tokens/top_p/penalty/tool_choice 等参数展示
 - 智能优化建议：基于 token、速度、缓存、消息长度的启发式提示
 
+#### 2.4.1 对话级“优化建议”当前规则
+
+当前版本的“优化建议”不是由大模型二次分析生成，而是前端根据单条会话详情字段执行一组固定启发式规则后直接展示。
+
+规则实现位置：`api/static/app.js` 中的 `promptOptimizationHints(detail)`。
+
+输入字段主要包括：
+
+- `system_prompt`
+- `user_prompt`
+- `assistant_response`
+- `prompt_tokens`
+- `completion_tokens`
+- `total_tokens`
+- `duration_ms`
+- `finish_reason`
+- `_extUsage.cacheRead`
+- `_reqMessages.length`
+
+当前触发规则如下：
+
+| 条件 | 提示含义 |
+|------|----------|
+| `system_prompt.length > 2800` | System prompt 偏长，建议拆分固定政策与动态上下文，减少重复 token |
+| `user_prompt.length < 30 && total_tokens > 1200` | 用户输入较短但总 token 偏高，可能上下文注入过多，建议摘要历史消息 |
+| `prompt_tokens > 0 && completion_tokens / prompt_tokens < 0.2` | Completion/Prompt 比例偏低，可能提示词约束过强 |
+| `finish_reason == "length"` | 输出被截断，建议提高 `max_tokens` 或压缩输入 |
+| `assistant_response.length / user_prompt.length > 20` | 回复长度远高于用户输入，可增加“简洁回答”约束降低成本 |
+| `prompt_tokens > 1000 && cacheRead == 0` | 输入 token 较多但未使用缓存，建议启用 Prompt Caching |
+| `cacheRead > 0 && cacheRead / prompt_tokens > 0.8` | 缓存命中率优秀，说明 Prompt Caching 运作良好 |
+| `duration_ms > 0 && completion_tokens > 0 && completionTokensPerSecond < 15` | 生成速度较慢，可考虑使用更快模型 |
+| `_reqMessages.length > 20` | 消息历史过长，可考虑摘要旧消息降低输入 token |
+
+其中生成速度计算方式为：
+
+$$
+completionTokensPerSecond = \frac{completion\_tokens}{duration\_ms / 1000}
+$$
+
+如果以上规则都未命中，则显示兜底提示：当前未发现明显异常，建议继续按模型、模板、时段进行横向对比优化。
+
+这意味着当前“优化建议”适合作为快速排查和成本/性能提示，不代表语义层面的回答质量评审，也不构成自动化 Prompt 评测结论。
+
+#### 2.4.2 Prompts 页 Quality Score 计算方式
+
+Prompts 页的 `Quality Score` 来自后端聚合统计，不依赖人工评分，也不是模型打分。它基于模板关联会话的可自动测量指标计算，实现在 `api/routers/prompts.py` 的 `_compute_quality_score(...)`。
+
+评分构成如下：
+
+- 稳定性：成功率 `success_rate`，满分 40 分
+- 完整性：未被截断比例 `1 - truncation_rate`，满分 30 分
+- 效率：输出/输入 token 比 `completion_prompt_ratio`，满分 30 分
+
+完整公式为：
+
+$$
+QualityScore = round(40 \cdot successRate + 30 \cdot (1 - truncationRate) + 30 \cdot min(cpRatio / 0.5, 1.0))
+$$
+
+其中：
+
+- `successRate = success_count / total_conversations`
+- `truncationRate = truncated_count / total_conversations`
+- `cpRatio = avg_completion_tokens / avg_prompt_tokens`
+
+补充说明：
+
+- 当 `cpRatio >= 0.5` 时，效率项按满分 30 分计算
+- `avg_rating` 与 `rated_count` 会在模板详情中单独展示，但当前不参与 `Quality Score` 计算
+- `Quality Score` 反映的是模板在稳定性、完整性、效率上的综合表现，而不是回答内容“好不好”的主观质量分
+
 ### 2.5 测试覆盖现状
 
 - API 结构和版本元数据由 pytest 覆盖
