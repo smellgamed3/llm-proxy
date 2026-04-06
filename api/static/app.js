@@ -1,7 +1,7 @@
 // LLM Proxy Analytics Dashboard — app.js
 
 const API = '/api';
-const APP_VERSION = 'v1.4.0';
+const APP_VERSION = 'v1.4.1';
 
 const NAV_GROUPS = [
   {
@@ -727,7 +727,8 @@ function formatDateTime(value) {
   if (!value) return '—';
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString();
+  const pad = n => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
 function renderMetricTable(targetId, rows) {
@@ -1561,7 +1562,7 @@ async function loadRawLogsPage(page) {
     if (!tbody) return;
     tbody.innerHTML = items.map(row => `
       <tr class="conversation-row raw-log-row${selectedRawLogId === row.id ? ' selected' : ''}" data-request-id="${row.id}">
-        <td>${row.timestamp ? row.timestamp.replace('T', ' ').slice(0, 19) : '—'}</td>
+        <td>${formatDateTime(row.timestamp)}</td>
         <td>${fmt(row.seq)}</td>
         <td>${row.method || '—'}</td>
         <td title="${escapeHtml(row.path || '')}">${escapeHtml(truncateText(row.path || '—', 48))}</td>
@@ -1638,7 +1639,7 @@ async function loadConversations(page) {
     if (!tbody) return;
     tbody.innerHTML = currentConversationRows.map(r => `
       <tr class="conversation-row${selectedConversationId === r.id ? ' selected' : ''}" data-conversation-id="${r.id}">
-        <td>${r.timestamp ? r.timestamp.replace('T', ' ').slice(0, 19) : '—'}</td>
+        <td>${formatDateTime(r.timestamp)}</td>
         <td>${r.model || '—'}</td>
         <td><span class="badge badge-${r.status === 'success' ? 'success' : 'error'}">${r.status}</span></td>
         <td>${r.request_type || '—'}</td>
@@ -3086,7 +3087,7 @@ async function showTemplateDetail(templateId) {
     if (convTbody) {
       convTbody.innerHTML = (conversations.items || []).map(r => `
         <tr>
-          <td>${r.timestamp ? r.timestamp.replace('T', ' ').slice(0, 19) : '—'}</td>
+          <td>${formatDateTime(r.timestamp)}</td>
           <td>${r.model || '—'}</td>
           <td><span class="badge badge-${r.status === 'success' ? 'success' : 'error'}">${r.status}</span></td>
           <td>${fmt(r.total_tokens)}</td>
@@ -3167,7 +3168,7 @@ async function loadErrorsPage() {
     if (tbody) {
       tbody.innerHTML = recent.map(r => `
         <tr>
-          <td>${r.timestamp ? r.timestamp.slice(0, 19).replace('T', ' ') : '—'}</td>
+          <td>${formatDateTime(r.timestamp)}</td>
           <td>${r.model || '—'}</td>
           <td>${r.error_type || '—'}</td>
           <td>${r.status_code || '—'}</td>
