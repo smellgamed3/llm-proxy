@@ -1,7 +1,7 @@
 // LLM Proxy Analytics Dashboard — app.js
 
 const API = '/api';
-const APP_VERSION = 'v1.4.2';
+const APP_VERSION = 'v1.4.3';
 
 const NAV_GROUPS = [
   {
@@ -1197,6 +1197,21 @@ function extractMessagesFromRequestBody(requestBody) {
   return null;
 }
 
+function extractPromptsFromRequestBody(requestBody) {
+  const parsed = parseField(requestBody);
+  const messages = extractMessagesFromRequestBody(requestBody);
+  const fromMessages = extractSystemAndUserPrompt(messages);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return fromMessages;
+  }
+
+  const topLevelSystem = normalizeMessageContent(parsed.system);
+  return {
+    systemPrompt: topLevelSystem || fromMessages.systemPrompt,
+    userPrompt: fromMessages.userPrompt,
+  };
+}
+
 function normalizeMessageContent(content) {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) {
@@ -1251,6 +1266,12 @@ function parseSSEChunks(text) {
 function extractAssistantFromResponseBody(responseBody) {
   const parsed = parseField(responseBody);
   if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    const anthropicContent = normalizeMessageContent(parsed.content);
+    if (anthropicContent) return anthropicContent;
+
+    const messageContent = normalizeMessageContent(parsed.message?.content);
+    if (messageContent) return messageContent;
+
     const choices = parsed.choices;
     if (Array.isArray(choices) && choices.length > 0) {
       const first = choices[0] || {};
@@ -1667,7 +1688,7 @@ async function showConversationDetail(conversationId) {
     ]);
 
     const reqMessages = extractMessagesFromRequestBody(raw.request_body);
-    const fallbackPrompts = extractSystemAndUserPrompt(reqMessages);
+    const fallbackPrompts = extractPromptsFromRequestBody(raw.request_body);
     const fallbackAssistant = extractAssistantFromResponseBody(raw.response_body);
     const fallbackUsage = extractUsageFromResponseBody(raw.response_body);
     const fallbackTools = extractToolsFromRequestBody(raw.request_body);

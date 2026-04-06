@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import gzip
 import hashlib
 import json
 import logging
@@ -8,6 +9,7 @@ import os
 import sqlite3
 import threading
 import uuid
+import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -217,6 +219,32 @@ class Recorder:
 
         return ref, original_size
 
+    @staticmethod
+    def _decode_body_for_storage(data: str | bytes | None, headers: dict | None) -> str | bytes | None:
+        """Decode compressed HTTP bodies before persisting JSONL shards."""
+        if data is None or isinstance(data, str):
+            return data
+
+        encoding = ""
+        if headers:
+            encoding = str(
+                headers.get("content-encoding")
+                or headers.get("Content-Encoding")
+                or ""
+            ).lower().strip()
+
+        try:
+            if encoding == "gzip":
+                return gzip.decompress(data)
+            if encoding == "deflate":
+                try:
+                    return zlib.decompress(data)
+                except zlib.error:
+                    return zlib.decompress(data, -zlib.MAX_WBITS)
+        except Exception as exc:
+            logger.debug("Failed to decode %s body for storage: %s", encoding or "raw", exc)
+        return data
+
     def record_request(
         self,
         request_id: str,
@@ -276,7 +304,8 @@ class Recorder:
         body_ref = None
         body_size = None
         if body:
-            body_ref, body_size = self._write_jsonl(request_id, "response", body)
+            stored_body = self._decode_body_for_storage(body, headers)
+            body_ref, body_size = self._write_jsonl(request_id, "response", stored_body)
 
         conn = self._get_conn()
         conn.execute(

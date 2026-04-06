@@ -17,6 +17,12 @@ class TestCanHandle:
     def test_messages_path(self, extractor):
         assert extractor.can_handle("/v1/messages", "POST", {})
 
+    def test_message_path(self, extractor):
+        assert extractor.can_handle("/v1/message", "POST", {})
+
+    def test_messages_subpath(self, extractor):
+        assert extractor.can_handle("/v1/messages/count_tokens", "POST", {})
+
     def test_other_path(self, extractor):
         assert not extractor.can_handle("/v1/chat/completions", "POST", {})
 
@@ -25,6 +31,38 @@ class TestCanHandle:
 
 
 class TestSuccessExtraction:
+    def test_message_path_extracts_chat_request_type(self, extractor):
+        req = json.dumps({
+            "model": "claude-sonnet-4-6",
+            "messages": [
+                {"role": "user", "content": "Hello from new-api"},
+            ],
+        })
+        resp = json.dumps({
+            "content": [{"type": "text", "text": "Hi there"}],
+            "usage": {"input_tokens": 11, "output_tokens": 3},
+        })
+        result = extractor.extract({"status_code": 200, "path": "/v1/message"}, req, resp)
+        assert result.provider == "anthropic"
+        assert result.request_type == "chat"
+        assert result.model == "claude-sonnet-4-6"
+        assert result.user_prompt == "Hello from new-api"
+
+    def test_count_tokens_path_extracts_tokens_request_type(self, extractor):
+        req = json.dumps({
+            "model": "claude-sonnet-4-6",
+            "messages": [
+                {"role": "user", "content": "Count my tokens"},
+            ],
+        })
+        resp = json.dumps({
+            "usage": {"input_tokens": 42},
+        })
+        result = extractor.extract({"status_code": 200, "path": "/v1/messages/count_tokens"}, req, resp)
+        assert result.request_type == "tokens"
+        assert result.model == "claude-sonnet-4-6"
+        assert result.user_prompt == "Count my tokens"
+
     def test_basic_chat(self, extractor):
         req = json.dumps({
             "model": "claude-opus-4-5",
@@ -155,6 +193,19 @@ class TestSuccessExtraction:
 
 
 class TestErrorExtraction:
+    def test_nested_error_type_extracted(self, extractor):
+        req = json.dumps({
+            "model": "claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "Hi"}],
+        })
+        resp = json.dumps({
+            "error": {"type": "not_found_error", "message": "No such route"},
+        })
+        result = extractor.extract({"status_code": 404, "path": "/v1/message"}, req, resp)
+        assert result.error_type == "not_found_error"
+        assert result.error_message == "No such route"
+        assert result.model == "claude-sonnet-4-6"
+
     def test_rate_limit_error(self, extractor):
         req = json.dumps({
             "model": "claude-opus-4-5",
@@ -167,7 +218,7 @@ class TestErrorExtraction:
         })
         result = extractor.extract({"status_code": 429}, req, resp)
         assert result.status == "rate_limited"
-        assert result.error_type == "error"
+        assert result.error_type == "rate_limit_error"
         assert "Rate limit exceeded" in (result.error_message or "")
 
     def test_timeout_error(self, extractor):

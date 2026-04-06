@@ -1,6 +1,7 @@
 """Tests for Recorder: SQLite schema, request/response recording, WS recording."""
 from __future__ import annotations
 
+import gzip
 import json
 import sqlite3
 import threading
@@ -278,6 +279,26 @@ class TestRecordResponse:
         rec.record_request(rid, "POST", "/v1/chat", "", {}, None)
         rec.record_response(rid, 502, {}, None, False, 10.0, error="connect failed")
         assert db_rows(rec, "raw_requests")[0]["error"] == "connect failed"
+
+    def test_gzip_response_body_is_decoded_before_storage(self, rec: Recorder):
+        rid = rec.new_request_id()
+        rec.record_request(rid, "POST", "/v1/chat", "", {}, None)
+        payload = b'{"error":{"type":"not_found_error","message":"missing route"}}'
+        gzipped = gzip.compress(payload)
+
+        rec.record_response(
+            rid,
+            404,
+            {"content-encoding": "gzip", "content-type": "application/json"},
+            gzipped,
+            False,
+            9.7,
+        )
+
+        entries = jsonl_bodies(rec)
+        response_entries = [entry for entry in entries if entry["ref"] == f"{rid}:response"]
+        assert len(response_entries) == 1
+        assert response_entries[0]["data"] == payload.decode()
 
     def test_body_truncated_at_max_size(self, rec: Recorder):
         cfg = Config(log_dir=str(rec.log_dir), max_body_log_size=100)

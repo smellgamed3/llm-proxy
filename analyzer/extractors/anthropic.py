@@ -9,11 +9,17 @@ from .utils import content_blocks_to_text
 logger = logging.getLogger("analyzer.extractors.anthropic")
 
 
+ANTHROPIC_PATHS = {
+    "/v1/message",
+    "/v1/messages",
+}
+
+
 class AnthropicExtractor(BaseExtractor):
-    """Handles Anthropic Messages API (/v1/messages)."""
+    """Handles Anthropic/new-api message endpoints."""
 
     def can_handle(self, path: str, method: str, request_headers: dict) -> bool:
-        return path == "/v1/messages"
+        return path in ANTHROPIC_PATHS or path.startswith("/v1/messages/")
 
     def extract(
         self,
@@ -21,7 +27,9 @@ class AnthropicExtractor(BaseExtractor):
         request_body: str | None,
         response_body: str | None,
     ) -> ExtractionResult:
-        result = ExtractionResult(provider="anthropic", request_type="chat")
+        path = raw_record.get("path") or ""
+        request_type = "tokens" if path.endswith("/count_tokens") else "chat"
+        result = ExtractionResult(provider="anthropic", request_type=request_type)
 
         req_data: dict = {}
         if request_body:
@@ -46,8 +54,9 @@ class AnthropicExtractor(BaseExtractor):
             if response_body:
                 try:
                     err_data = json.loads(response_body)
-                    result.error_type = err_data.get("type")
-                    result.error_message = err_data.get("error", {}).get("message")
+                    error_obj = err_data.get("error") if isinstance(err_data.get("error"), dict) else {}
+                    result.error_type = error_obj.get("type") or err_data.get("type")
+                    result.error_message = error_obj.get("message") or err_data.get("message")
                 except json.JSONDecodeError:
                     result.error_message = response_body[:500]
             result.status = classify_status(status_code, result.error_type, result.error_message)
