@@ -16,8 +16,9 @@
       <input type="text" id="template-filter" placeholder="Template ID" />
       <input type="text" id="path-prefix-filter" placeholder="Path prefix" value="/v1/" />
       <select id="request-type-filter">
-        <option value="chat" selected>Type: chat</option>
-        <option value="">Type: all</option>
+        <option value="" selected>Type: all</option>
+        <option value="chat">chat</option>
+        <option value="tokens">tokens</option>
         <option value="completion">completion</option>
         <option value="embedding">embedding</option>
       </select>
@@ -25,6 +26,7 @@
         <option value="">All statuses</option>
         <option value="success">Success</option>
         <option value="error">Error</option>
+        <option value="unsupported">Unsupported</option>
       </select>
       <input type="date" id="date-from" aria-label="date from" />
       <input type="date" id="date-to" aria-label="date to" />

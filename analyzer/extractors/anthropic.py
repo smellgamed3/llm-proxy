@@ -15,6 +15,12 @@ ANTHROPIC_PATHS = {
 }
 
 
+def _classify_anthropic_status(request_type: str, status_code: int | None, error_type: str | None, error_message: str | None) -> str:
+    if request_type == "tokens" and status_code == 404 and error_type == "not_found_error":
+        return "unsupported"
+    return classify_status(status_code, error_type, error_message)
+
+
 class AnthropicExtractor(BaseExtractor):
     """Handles Anthropic/new-api message endpoints."""
 
@@ -59,7 +65,7 @@ class AnthropicExtractor(BaseExtractor):
                     result.error_message = error_obj.get("message") or err_data.get("message")
                 except json.JSONDecodeError:
                     result.error_message = response_body[:500]
-            result.status = classify_status(status_code, result.error_type, result.error_message)
+            result.status = _classify_anthropic_status(request_type, status_code, result.error_type, result.error_message)
             return result
 
         result.status = "success"

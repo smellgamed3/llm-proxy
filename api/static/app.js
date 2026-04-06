@@ -1,7 +1,7 @@
 // LLM Proxy Analytics Dashboard — app.js
 
 const API = '/api';
-const APP_VERSION = 'v1.4.3';
+const APP_VERSION = 'v1.4.4';
 
 const NAV_GROUPS = [
   {
@@ -729,6 +729,20 @@ function formatDateTime(value) {
   if (Number.isNaN(date.getTime())) return value;
   const pad = n => String(n).padStart(2, '0');
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function conversationBadgeClass(status) {
+  switch (status) {
+    case 'success':
+      return 'success';
+    case 'unsupported':
+      return 'warning';
+    case 'rate_limited':
+    case 'timeout':
+      return 'warning';
+    default:
+      return 'error';
+  }
 }
 
 function renderMetricTable(targetId, rows) {
@@ -1662,7 +1676,7 @@ async function loadConversations(page) {
       <tr class="conversation-row${selectedConversationId === r.id ? ' selected' : ''}" data-conversation-id="${r.id}">
         <td>${formatDateTime(r.timestamp)}</td>
         <td>${r.model || '—'}</td>
-        <td><span class="badge badge-${r.status === 'success' ? 'success' : 'error'}">${r.status}</span></td>
+        <td><span class="badge badge-${conversationBadgeClass(r.status)}">${r.status}</span></td>
         <td>${r.request_type || '—'}</td>
         <td>${renderPromptCompletionPreview(r)}</td>
         <td>${fmt(r.total_tokens)}</td>
@@ -2901,7 +2915,7 @@ function resetConversationFilters() {
       else if (id === 'order-filter') el.value = 'desc';
       else if (id === 'page-size-filter') el.value = '50';
       else if (id === 'path-prefix-filter') el.value = '/v1/';
-      else if (id === 'request-type-filter') el.value = 'chat';
+      else if (id === 'request-type-filter') el.value = '';
       else el.value = '';
     });
   loadConversations(1);
