@@ -205,6 +205,18 @@ class TestErrorExtraction:
         assert result.status == "unsupported"
         assert result.error_type == "not_found_error"
 
+    def test_count_tokens_invalid_request_404_marked_unsupported(self, extractor):
+        req = json.dumps({
+            "model": "claude-sonnet-4-6",
+            "messages": [{"role": "user", "content": "Count my tokens"}],
+        })
+        resp = json.dumps({
+            "error": {"type": "invalid_request_error", "message": "Invalid URL (POST /v1/messages/count_tokens)"},
+        })
+        result = extractor.extract({"status_code": 404, "path": "/v1/messages/count_tokens"}, req, resp)
+        assert result.status == "unsupported"
+        assert result.error_type == "invalid_request_error"
+
     def test_nested_error_type_extracted(self, extractor):
         req = json.dumps({
             "model": "claude-sonnet-4-6",

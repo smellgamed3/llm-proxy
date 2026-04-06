@@ -16,7 +16,7 @@ ANTHROPIC_PATHS = {
 
 
 def _classify_anthropic_status(request_type: str, status_code: int | None, error_type: str | None, error_message: str | None) -> str:
-    if request_type == "tokens" and status_code == 404 and error_type == "not_found_error":
+    if request_type == "tokens" and status_code == 404:
         return "unsupported"
     return classify_status(status_code, error_type, error_message)
 

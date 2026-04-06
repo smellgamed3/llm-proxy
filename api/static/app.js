@@ -1,7 +1,7 @@
 // LLM Proxy Analytics Dashboard — app.js
 
 const API = '/api';
-const APP_VERSION = 'v1.4.4';
+const APP_VERSION = 'v1.4.5';
 
 const NAV_GROUPS = [
   {
