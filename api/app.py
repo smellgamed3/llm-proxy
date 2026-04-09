@@ -20,7 +20,7 @@ logger = logging.getLogger("llm-proxy.api")
 
 def create_app() -> FastAPI:
     configure_logging(service_name="api", level=os.getenv("LOG_LEVEL", "INFO"))
-    app = FastAPI(title="LLM Proxy Analytics API", version="1.4.5")
+    app = FastAPI(title="LLM Proxy Analytics API", version="1.4.6")
     app.state.analyzer_sync_manager = admin.AnalyzerSyncManager()
     app.add_middleware(RateLimitMiddleware)
 

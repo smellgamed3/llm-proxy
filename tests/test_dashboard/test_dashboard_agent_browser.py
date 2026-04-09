@@ -394,6 +394,7 @@ def _build_handler(state: DashboardMockState):
                     {
                         "items": [
                             {
+                                "id": "conv-1",
                                 "timestamp": "2026-04-05T10:20:30Z",
                                 "model": "gpt-4o-mini",
                                 "status": "success",
@@ -974,8 +975,14 @@ def test_prompts_page_detail_flow_with_agent_browser(
         _wait_until(lambda: _expect_eval(browser, 'String(document.getElementById("template-detail").hidden)', "false"))
         _wait_until(lambda: _expect_text(browser, "#tmpl-detail-id", "tpl-ops-summary"))
         _wait_until(lambda: _expect_eval(browser, 'document.getElementById("tmpl-system-prompt").textContent.includes("operations assistant") ? "yes" : "no"', "yes"))
+        _wait_until(lambda: _expect_count(browser, "#tmpl-conversations-tbody tr", 1))
+        browser.run("click", "#tmpl-conversations-tbody tr:first-child")
+        _wait_until(lambda: _expect_eval(browser, 'String(document.getElementById("conv-modal-overlay").hidden)', "false"))
+        _wait_until(lambda: _expect_eval(browser, 'document.getElementById("detail-meta").textContent.includes("conv-1") ? "yes" : "no"', "yes"))
         assert state.latest_hashes("/api/prompts/templates") == [SCOPED_HASH]
         assert state.latest_hashes("/api/prompts/templates/tpl-ops-summary") == [SCOPED_HASH]
+        assert state.latest_hashes("/api/conversations/conv-1") == [SCOPED_HASH]
+        assert state.latest_hashes("/api/conversations/conv-1/raw") == [SCOPED_HASH]
     finally:
         browser.close()
 

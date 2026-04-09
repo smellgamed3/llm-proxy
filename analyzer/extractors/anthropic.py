@@ -49,11 +49,19 @@ class AnthropicExtractor(BaseExtractor):
 
         messages = req_data.get("messages", [])
         result.messages_count = len(messages)
-        result.system_prompt = req_data.get("system")
+        result.system_prompt = content_blocks_to_text(req_data.get("system"))
         for msg in reversed(messages):
             if msg.get("role") == "user":
                 result.user_prompt = content_blocks_to_text(msg.get("content"))
                 break
+
+        # Extract tools
+        tools = req_data.get("tools")
+        if tools and isinstance(tools, list):
+            result.has_tools = True
+            result.tools_list = [
+                t.get("name", "") for t in tools if isinstance(t, dict)
+            ]
 
         status_code = raw_record.get("status_code")
         if status_code and status_code >= 400:
@@ -84,6 +92,30 @@ class AnthropicExtractor(BaseExtractor):
 
             result.finish_reason = data.get("stop_reason")
 
-            result.assistant_response = content_blocks_to_text(data.get("content"), separator="")
+            content = data.get("content")
+            text_response = content_blocks_to_text(content, separator="")
+            if text_response:
+                result.assistant_response = text_response
+            elif isinstance(content, list):
+                # Summarise tool_use blocks when no text content present
+                tool_uses = [
+                    b for b in content
+                    if isinstance(b, dict) and b.get("type") == "tool_use"
+                ]
+                if tool_uses:
+                    parts = []
+                    for tu in tool_uses:
+                        name = tu.get("name", "unknown")
+                        inp = tu.get("input")
+                        if inp:
+                            import json as _json
+                            try:
+                                inp_str = _json.dumps(inp, ensure_ascii=False)
+                            except Exception:
+                                inp_str = str(inp)
+                            parts.append(f"[tool_use] {name}({inp_str})")
+                        else:
+                            parts.append(f"[tool_use] {name}()")
+                    result.assistant_response = "\n".join(parts)
 
         return result

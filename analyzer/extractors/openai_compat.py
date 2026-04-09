@@ -124,6 +124,22 @@ class OpenAICompatExtractor(BaseExtractor):
             msg = choice.get("message") or {}
             if isinstance(msg, dict):
                 result.assistant_response = to_text(msg.get("content"))
+                # Capture tool_calls / function_call when no text content
+                if not result.assistant_response:
+                    tool_calls = msg.get("tool_calls")
+                    function_call = msg.get("function_call")
+                    if isinstance(tool_calls, list) and tool_calls:
+                        parts = []
+                        for tc in tool_calls:
+                            fn = tc.get("function", {}) if isinstance(tc, dict) else {}
+                            name = fn.get("name", "unknown") if isinstance(fn, dict) else "unknown"
+                            args = fn.get("arguments", "") if isinstance(fn, dict) else ""
+                            parts.append(f"[tool_call] {name}({args})")
+                        result.assistant_response = "\n".join(parts)
+                    elif isinstance(function_call, dict):
+                        name = function_call.get("name", "unknown")
+                        args = function_call.get("arguments", "")
+                        result.assistant_response = f"[function_call] {name}({args})"
             if not result.assistant_response:
                 result.assistant_response = to_text(choice.get("text"))
 

@@ -288,3 +288,119 @@ class TestErrorExtraction:
         result = extractor.extract({"status_code": 200}, "not-json", None)
         assert result.model is None
         assert result.messages_count == 0
+
+
+class TestToolsExtraction:
+    """Tests for Anthropic tools extraction."""
+
+    def test_tools_extracted_from_request(self, extractor):
+        req = json.dumps({
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 1024,
+            "tools": [
+                {"name": "get_weather", "description": "Get weather", "input_schema": {"type": "object"}},
+                {"name": "calculator", "description": "Do math", "input_schema": {"type": "object"}},
+            ],
+            "messages": [{"role": "user", "content": "What is the weather?"}],
+        })
+        resp = json.dumps({
+            "content": [{"type": "text", "text": "Let me check."}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 50, "output_tokens": 10},
+        })
+        result = extractor.extract({"status_code": 200, "path": "/v1/messages"}, req, resp)
+        assert result.has_tools is True
+        assert result.tools_list == ["get_weather", "calculator"]
+
+    def test_no_tools_field(self, extractor):
+        req = json.dumps({
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 512,
+            "messages": [{"role": "user", "content": "Hello"}],
+        })
+        resp = json.dumps({
+            "content": [{"type": "text", "text": "Hi"}],
+            "usage": {"input_tokens": 5, "output_tokens": 2},
+        })
+        result = extractor.extract({"status_code": 200, "path": "/v1/messages"}, req, resp)
+        assert result.has_tools is False
+        assert result.tools_list is None
+
+    def test_tool_use_response_captured(self, extractor):
+        req = json.dumps({
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 1024,
+            "tools": [{"name": "get_weather", "description": "Get weather", "input_schema": {"type": "object"}}],
+            "messages": [{"role": "user", "content": "Weather in NYC?"}],
+        })
+        resp = json.dumps({
+            "content": [
+                {"type": "tool_use", "id": "toolu_01", "name": "get_weather", "input": {"city": "NYC"}},
+            ],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 50, "output_tokens": 30},
+        })
+        result = extractor.extract({"status_code": 200, "path": "/v1/messages"}, req, resp)
+        assert result.finish_reason == "tool_use"
+        assert result.assistant_response is not None
+        assert "get_weather" in result.assistant_response
+        assert "NYC" in result.assistant_response
+
+    def test_mixed_text_and_tool_use_response(self, extractor):
+        req = json.dumps({
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 1024,
+            "tools": [{"name": "get_weather", "description": "Get weather", "input_schema": {"type": "object"}}],
+            "messages": [{"role": "user", "content": "Weather?"}],
+        })
+        resp = json.dumps({
+            "content": [
+                {"type": "text", "text": "Let me check the weather."},
+                {"type": "tool_use", "id": "toolu_01", "name": "get_weather", "input": {"city": "NYC"}},
+            ],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 50, "output_tokens": 30},
+        })
+        result = extractor.extract({"status_code": 200, "path": "/v1/messages"}, req, resp)
+        # When text blocks are present, text content takes priority
+        assert result.assistant_response == "Let me check the weather."
+
+    def test_system_as_content_blocks(self, extractor):
+        """System prompt as content blocks array (prompt caching) is extracted correctly."""
+        req = json.dumps({
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 512,
+            "system": [
+                {"type": "text", "text": "You are a helpful assistant.", "cache_control": {"type": "ephemeral"}},
+            ],
+            "messages": [{"role": "user", "content": "Hello"}],
+        })
+        resp = json.dumps({
+            "content": [{"type": "text", "text": "Hi"}],
+            "usage": {"input_tokens": 10, "output_tokens": 2},
+        })
+        result = extractor.extract({"status_code": 200, "path": "/v1/messages"}, req, resp)
+        assert result.system_prompt == "You are a helpful assistant."
+
+    def test_multiple_tool_use_blocks(self, extractor):
+        """Multiple tool_use blocks in response are all captured."""
+        req = json.dumps({
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 1024,
+            "tools": [
+                {"name": "get_weather", "description": "Weather", "input_schema": {"type": "object"}},
+                {"name": "get_time", "description": "Time", "input_schema": {"type": "object"}},
+            ],
+            "messages": [{"role": "user", "content": "Weather and time?"}],
+        })
+        resp = json.dumps({
+            "content": [
+                {"type": "tool_use", "id": "toolu_01", "name": "get_weather", "input": {"city": "NYC"}},
+                {"type": "tool_use", "id": "toolu_02", "name": "get_time", "input": {"timezone": "EST"}},
+            ],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 60, "output_tokens": 40},
+        })
+        result = extractor.extract({"status_code": 200, "path": "/v1/messages"}, req, resp)
+        assert "get_weather" in result.assistant_response
+        assert "get_time" in result.assistant_response
