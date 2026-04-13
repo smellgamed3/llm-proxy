@@ -5,7 +5,6 @@ import gzip
 import hashlib
 import json
 import logging
-import os
 import sqlite3
 import threading
 import uuid
@@ -70,6 +69,10 @@ class Recorder:
             conn = sqlite3.connect(str(self.db_path), timeout=10)
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA cache_size=-32000")       # 32 MB page cache
+            conn.execute("PRAGMA mmap_size=134217728")     # 128 MB mmap read
+            conn.execute("PRAGMA wal_autocheckpoint=2000") # checkpoint every ~8 MB WAL
+            conn.execute("PRAGMA temp_store=MEMORY")
             self._local.conn = conn
         return self._local.conn
 
@@ -201,8 +204,8 @@ class Recorder:
             offset = jsonl_path.stat().st_size if jsonl_path.exists() else 0
             with open(jsonl_path, "ab") as f:
                 f.write(line_bytes)
-                f.flush()
-                os.fsync(f.fileno())
+                # No fsync: OS page-cache buffering is sufficient for analytics
+                # logs. Forcing fsync here caused 2+ GB/s I/O spikes.
 
             # Update manifest
             manifest_path = self.bodies_dir / "manifest.jsonl"
@@ -214,8 +217,7 @@ class Recorder:
             }, ensure_ascii=False)
             with open(manifest_path, "a", encoding="utf-8") as mf:
                 mf.write(manifest_entry + "\n")
-                mf.flush()
-                os.fsync(mf.fileno())
+                # No fsync: manifest is rebuilt from JSONL on crash recovery.
 
         return ref, original_size
 

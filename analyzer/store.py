@@ -14,14 +14,27 @@ class AnalyticsStore:
     def __init__(self, db_path: str):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn: sqlite3.Connection | None = None
         self._init_db()
 
     def _get_conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path), timeout=10)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.row_factory = sqlite3.Row
-        return conn
+        """Return the persistent write connection (lazily created).
+
+        A single long-lived connection avoids the overhead of repeated
+        sqlite3.connect / close cycles, each of which can trigger a WAL
+        checkpoint and cause I/O spikes.
+        """
+        if self._conn is None:
+            conn = sqlite3.connect(str(self.db_path), timeout=30, check_same_thread=False)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA cache_size=-65536")       # 64 MB page cache
+            conn.execute("PRAGMA mmap_size=268435456")     # 256 MB mmap read
+            conn.execute("PRAGMA wal_autocheckpoint=4000") # checkpoint every ~16 MB WAL
+            conn.execute("PRAGMA temp_store=MEMORY")
+            conn.row_factory = sqlite3.Row
+            self._conn = conn
+        return self._conn
 
     def _init_db(self) -> None:
         with self._get_conn() as conn:
