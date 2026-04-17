@@ -1763,12 +1763,89 @@ async function loadConversations(page) {
 async function showConversationDetail(conversationId) {
   selectedConversationId = conversationId;
   ensureConvModal();
-  try {
-    const [detail, raw] = await Promise.all([
-      fetchJSON(`${API}/conversations/${conversationId}`),
-      fetchJSON(`${API}/conversations/${conversationId}/raw`),
-    ]);
 
+  // ── 立即显示 modal，不等待任何网络请求 ──────────────────────────
+  const overlay = document.getElementById('conv-modal-overlay');
+  overlay.hidden = false;
+  document.body.style.overflow = 'hidden';
+
+  // 显示 loading 占位
+  const metaEl = document.getElementById('detail-meta');
+  if (metaEl) metaEl.innerHTML = '<span class="loading-placeholder">加载中…</span>';
+  const sectionsEl = document.getElementById('detail-sections');
+  if (sectionsEl) sectionsEl.innerHTML = '<div class="loading-skeleton" style="padding:1rem;color:#888">正在加载提示词分析…</div>';
+  ['breakdown-chart-io','breakdown-chart-composition','breakdown-chart-skills'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.innerHTML = '';
+  });
+  ['detail-request-body','detail-response-body','detail-request-headers','detail-response-headers'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = '';
+  });
+
+  // 高亮选中行
+  document.querySelectorAll('.conversation-row').forEach((row) => {
+    row.classList.toggle('selected', row.dataset.conversationId === conversationId);
+  });
+
+  // ── 并行发起两个请求，各自到达后立即渲染 ───────────────────────
+  const detailPromise = fetchJSON(`${API}/conversations/${conversationId}`);
+  const rawPromise = fetchJSON(`${API}/conversations/${conversationId}/raw`);
+
+  // detail 到达后立即渲染元数据区（无需等 raw）
+  let detailData = null;
+  try {
+    detailData = await detailPromise;
+
+    // 如果页面已切换到其他对话，丢弃结果
+    if (selectedConversationId !== conversationId) return;
+
+    if (metaEl) {
+      metaEl.innerHTML = `
+        <span><strong>ID:</strong> ${detailData.id}</span>
+        <span><strong>Provider:</strong> ${detailData.provider || '—'}</span>
+        <span><strong>Model:</strong> ${detailData.model || '—'}</span>
+        <span><strong>Status:</strong> ${detailData.status || '—'}</span>
+        <span><strong>Template:</strong> ${detailData.template_id || '—'}</span>
+        <span><strong>Finish:</strong> ${detailData.finish_reason || '—'}</span>
+        <span><strong>Latency:</strong> ${fmt(detailData.duration_ms, 1)} ms</span>
+        <span><strong>Cost:</strong> ${detailData.cost_usd != null ? '$' + Number(detailData.cost_usd).toFixed(6) : '—'}</span>
+      `;
+    }
+
+    // Rating widget
+    const ratingEl = document.getElementById('detail-rating');
+    if (ratingEl) {
+      const currentRating = detailData.rating || 0;
+      ratingEl.innerHTML = [1,2,3,4,5].map(i =>
+        `<span class="rating-star${i <= currentRating ? ' active' : ''}" data-rating="${i}" onclick="setConversationRating('${detailData.id}', ${i})">★</span>`
+      ).join('') +
+        (currentRating ? `<button class="rating-clear" onclick="clearConversationRating('${detailData.id}')">Clear</button>` : '') +
+        (detailData.rating_comment ? `<span class="rating-comment">${escapeHtml(detailData.rating_comment)}</span>` : '');
+    }
+
+    // Tags widget
+    const tagsEl = document.getElementById('detail-tags');
+    if (tagsEl) {
+      let tags = [];
+      try { tags = JSON.parse(detailData.tags || '[]'); } catch { tags = []; }
+      tagsEl.innerHTML = tags.map(t =>
+        `<span class="tag-badge">${escapeHtml(t)} <span class="tag-remove" onclick="removeConversationTag('${detailData.id}', '${escapeHtml(t)}')">&times;</span></span>`
+      ).join('') +
+        `<input type="text" class="tag-input" id="tag-input-${detailData.id}" placeholder="Add tag…" onkeydown="if(event.key==='Enter')addConversationTag('${detailData.id}')" />`;
+    }
+  } catch (e) {
+    console.error('Conversation detail (meta) load error:', e);
+    if (metaEl) metaEl.innerHTML = '<span style="color:red">元数据加载失败</span>';
+  }
+
+  // raw 到达后渲染提示词分析区
+  try {
+    const raw = await rawPromise;
+
+    if (selectedConversationId !== conversationId) return;
+
+    const detail = detailData || {};
     const reqMessages = extractMessagesFromRequestBody(raw.request_body);
     const fallbackPrompts = extractPromptsFromRequestBody(raw.request_body);
     const fallbackAssistant = extractAssistantFromResponseBody(raw.response_body);
@@ -1784,57 +1861,17 @@ async function showConversationDetail(conversationId) {
     const resolvedCompletionTokens = detail.completion_tokens ?? fallbackUsage?.completion ?? null;
     const resolvedTotalTokens = detail.total_tokens ?? fallbackUsage?.total ?? null;
 
-    // Extract extended usage info
     const extUsage = fallbackUsage || {};
     const cacheReadTokens = extUsage.cacheRead ?? null;
     const cacheCreationTokens = extUsage.cacheCreation ?? null;
     const reasoningTokens = extUsage.reasoning ?? null;
 
-    // Extract request/response body sizes
     const reqBodySize = raw.request_body_size ?? (raw.request_body ? new Blob([raw.request_body]).size : null);
     const resBodySize = raw.response_body_size ?? (raw.response_body ? new Blob([raw.response_body]).size : null);
 
-    // Extract full tool definitions for parameter display
     const fullToolDefs = extractFullToolDefinitions(raw.request_body);
 
-    // Show the modal
-    document.getElementById('conv-modal-overlay').hidden = false;
-    document.body.style.overflow = 'hidden';
-
-    document.getElementById('detail-meta').innerHTML = `
-      <span><strong>ID:</strong> ${detail.id}</span>
-      <span><strong>Provider:</strong> ${detail.provider || '—'}</span>
-      <span><strong>Model:</strong> ${detail.model || '—'}</span>
-      <span><strong>Status:</strong> ${detail.status || '—'}</span>
-      <span><strong>Template:</strong> ${detail.template_id || '—'}</span>
-      <span><strong>Finish:</strong> ${detail.finish_reason || '—'}</span>
-      <span><strong>Latency:</strong> ${fmt(detail.duration_ms, 1)} ms</span>
-      <span><strong>Cost:</strong> ${detail.cost_usd != null ? '$' + Number(detail.cost_usd).toFixed(6) : '—'}</span>
-    `;
-
-    // Rating widget
-    const ratingEl = document.getElementById('detail-rating');
-    if (ratingEl) {
-      const currentRating = detail.rating || 0;
-      ratingEl.innerHTML = [1,2,3,4,5].map(i =>
-        `<span class="rating-star${i <= currentRating ? ' active' : ''}" data-rating="${i}" onclick="setConversationRating('${detail.id}', ${i})">★</span>`
-      ).join('') +
-        (currentRating ? `<button class="rating-clear" onclick="clearConversationRating('${detail.id}')">Clear</button>` : '') +
-        (detail.rating_comment ? `<span class="rating-comment">${escapeHtml(detail.rating_comment)}</span>` : '');
-    }
-
-    // Tags widget
-    const tagsEl = document.getElementById('detail-tags');
-    if (tagsEl) {
-      let tags = [];
-      try { tags = JSON.parse(detail.tags || '[]'); } catch { tags = []; }
-      tagsEl.innerHTML = tags.map(t =>
-        `<span class="tag-badge">${escapeHtml(t)} <span class="tag-remove" onclick="removeConversationTag('${detail.id}', '${escapeHtml(t)}')">&times;</span></span>`
-      ).join('') +
-        `<input type="text" class="tag-input" id="tag-input-${detail.id}" placeholder="Add tag…" onkeydown="if(event.key==='Enter')addConversationTag('${detail.id}')" />`;
-    }
-
-    // Token breakdown — enhanced dual chart
+    // Token breakdown
     renderTokenBreakdown({
       promptTokens: resolvedPromptTokens,
       completionTokens: resolvedCompletionTokens,
@@ -1860,7 +1897,6 @@ async function showConversationDetail(conversationId) {
     document.getElementById('detail-response-headers').textContent = prettyJSONOrText(raw.response_headers);
 
     // Build collapsible sections
-    const sectionsEl = document.getElementById('detail-sections');
     if (sectionsEl) {
       sectionsEl.innerHTML = buildCollapsibleSections({
         detail,
@@ -1881,12 +1917,9 @@ async function showConversationDetail(conversationId) {
         responseToolCalls,
       });
     }
-
-    document.querySelectorAll('.conversation-row').forEach((row) => {
-      row.classList.toggle('selected', row.dataset.conversationId === conversationId);
-    });
   } catch (e) {
-    console.error('Conversation detail load error:', e);
+    console.error('Conversation detail (raw) load error:', e);
+    if (sectionsEl) sectionsEl.innerHTML = '<div style="padding:1rem;color:red">提示词分析加载失败</div>';
   }
 }
 
