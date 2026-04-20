@@ -1,0 +1,256 @@
+"""Multi-process parallel record processing for the analyzer.
+
+Architecture:
+  Main process (Fetcher + Writer)
+    - fetches batches from raw.db
+    - batch-reads body files (I/O)
+    - dispatches CPU work to a process pool
+    - batch-writes results to analytics.db
+
+  Worker pool (N processes)
+    - JSON parsing of request/response bodies
+    - extractor selection + extraction
+    - cost calculation
+    - fingerprinting
+    - returns processed result dicts (no I/O side-effects)
+"""
+
+from __future__ import annotations
+
+import hashlib
+import logging
+import multiprocessing as mp
+import os
+from concurrent.futures import ProcessPoolExecutor
+from typing import Any
+
+import orjson
+
+logger = logging.getLogger("analyzer.parallel")
+
+# ---------------------------------------------------------------------------
+# Per-process worker state (initialised once via _init_worker)
+# ---------------------------------------------------------------------------
+_extractors: list | None = None
+_cost_calculator: Any = None
+_fingerprinter: Any = None
+
+
+def _init_worker(pricing_file: str) -> None:
+    """Initialise heavy objects once per worker process."""
+    global _extractors, _cost_calculator, _fingerprinter
+
+    from analyzer.cost import CostCalculator
+    from analyzer.extractors.anthropic import AnthropicExtractor
+    from analyzer.extractors.generic import GenericExtractor
+    from analyzer.extractors.openai_compat import OpenAICompatExtractor
+    from analyzer.fingerprint import Fingerprinter
+
+    _extractors = [
+        OpenAICompatExtractor(),
+        AnthropicExtractor(),
+        GenericExtractor(),
+    ]
+    _cost_calculator = CostCalculator(pricing_file)
+    _fingerprinter = Fingerprinter()
+
+
+# ---------------------------------------------------------------------------
+# Pure-compute function executed in worker processes
+# ---------------------------------------------------------------------------
+
+
+def _process_record_in_worker(
+    args: tuple[dict, str | None, str | None],
+) -> dict[str, Any] | None:
+    """Process a single record using per-process state.
+
+    Returns a dict with keys ``conv_data``, ``template_info``, ``date``
+    or *None* on error.
+    """
+    try:
+        record, request_body, response_body = args
+        return process_record_cpu(
+            record,
+            request_body,
+            response_body,
+            _extractors,  # type: ignore[arg-type]
+            _cost_calculator,
+            _fingerprinter,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Worker error for record %s: %s", args[0].get("id", "?"), exc)
+        return None
+
+
+def process_record_cpu(
+    record: dict,
+    request_body: str | None,
+    response_body: str | None,
+    extractors: list,
+    cost_calculator: Any,
+    fingerprinter: Any,
+) -> dict[str, Any]:
+    """Pure CPU processing of a single record — no I/O side-effects.
+
+    Returns ``{"conv_data": dict, "template_info": tuple|None, "date": str}``.
+    """
+    # Parse request headers
+    request_headers: dict = {}
+    raw_headers = record.get("request_headers")
+    if raw_headers:
+        try:
+            request_headers = orjson.loads(raw_headers)
+        except Exception:
+            pass
+
+    # Select extractor
+    path = record.get("path", "")
+    method = record.get("method", "")
+    extractor = extractors[-1]  # GenericExtractor fallback
+    for ext in extractors:
+        if ext.can_handle(path, method, request_headers):
+            extractor = ext
+            break
+
+    result = extractor.extract(record, request_body, response_body)
+
+    # Cost
+    cost = cost_calculator.calculate(
+        result.model, result.prompt_tokens, result.completion_tokens
+    )
+
+    # Fingerprint
+    template_id = fingerprinter.fingerprint(result.system_prompt)
+
+    # API key hash
+    api_key_hash = record.get("api_key_hash")
+    if not api_key_hash:
+        auth = (
+            request_headers.get("authorization")
+            or request_headers.get("Authorization")
+            or ""
+        )
+        if auth.lower().startswith("bearer "):
+            key = auth[7:].strip()
+        else:
+            key = (
+                request_headers.get("x-api-key")
+                or request_headers.get("X-Api-Key")
+                or ""
+            ).strip()
+        if key:
+            api_key_hash = hashlib.sha256(key.encode()).hexdigest()[:32]
+
+    # Build conversation data
+    timestamp = record.get("timestamp", "")
+    date = timestamp[:10] if timestamp else ""
+
+    tools_list_json = (
+        orjson.dumps(result.tools_list).decode() if result.tools_list else None
+    )
+
+    conv_data: dict = {
+        "id": record["id"],
+        "seq": record.get("seq"),
+        "timestamp": timestamp,
+        "path": path,
+        "method": method,
+        "provider": result.provider,
+        "model": result.model,
+        "request_type": result.request_type,
+        "status": result.status,
+        "error_type": result.error_type,
+        "error_message": result.error_message,
+        "status_code": record.get("status_code"),
+        "is_stream": record.get("is_stream", 0),
+        "duration_ms": record.get("duration_ms"),
+        "client_ip": record.get("client_ip"),
+        "upstream_url": record.get("upstream_url"),
+        "prompt_tokens": result.prompt_tokens,
+        "completion_tokens": result.completion_tokens,
+        "total_tokens": result.total_tokens,
+        "cost_usd": cost,
+        "template_id": template_id,
+        "finish_reason": result.finish_reason,
+        "has_tools": 1 if result.has_tools else 0,
+        "tools_list": tools_list_json,
+        "messages_count": result.messages_count,
+        "temperature": result.temperature,
+        "max_tokens": result.max_tokens,
+        "system_prompt": result.system_prompt,
+        "user_prompt": result.user_prompt,
+        "assistant_response": result.assistant_response,
+        "api_key_hash": api_key_hash,
+    }
+
+    template_info = None
+    if template_id and result.system_prompt:
+        template_info = (template_id, result.system_prompt, timestamp, cost)
+
+    return {"conv_data": conv_data, "template_info": template_info, "date": date}
+
+
+# ---------------------------------------------------------------------------
+# Pool manager
+# ---------------------------------------------------------------------------
+
+
+def resolve_num_workers(configured: int) -> int:
+    """Resolve the effective number of worker processes.
+
+    * ``0`` → auto: ``max(1, cpu_count - 1)``
+    * ``1`` → single-process mode (no pool)
+    * ``N`` → exactly N workers
+    """
+    if configured == 1:
+        return 1
+    if configured <= 0:
+        cpu = os.cpu_count() or 2
+        return max(1, cpu - 1)
+    return configured
+
+
+class ParallelProcessor:
+    """Manages a ``ProcessPoolExecutor`` for CPU-bound record processing."""
+
+    def __init__(self, num_workers: int, pricing_file: str):
+        self.num_workers = num_workers
+        self.pricing_file = pricing_file
+        self._pool: ProcessPoolExecutor | None = None
+
+    def _ensure_pool(self) -> ProcessPoolExecutor:
+        if self._pool is None:
+            ctx = mp.get_context("fork")
+            self._pool = ProcessPoolExecutor(
+                max_workers=self.num_workers,
+                mp_context=ctx,
+                initializer=_init_worker,
+                initargs=(self.pricing_file,),
+            )
+        return self._pool
+
+    def process_batch(
+        self,
+        tasks: list[tuple[dict, str | None, str | None]],
+    ) -> list[dict[str, Any] | None]:
+        """Submit *tasks* to the pool and return results in order.
+
+        Each task is ``(record, request_body, response_body)``.
+        Returns a list of result dicts (or None for failed records).
+        """
+        pool = self._ensure_pool()
+        futures = [pool.submit(_process_record_in_worker, t) for t in tasks]
+        results: list[dict[str, Any] | None] = []
+        for fut in futures:
+            try:
+                results.append(fut.result())
+            except Exception as exc:
+                logger.error("Future failed: %s", exc)
+                results.append(None)
+        return results
+
+    def shutdown(self) -> None:
+        if self._pool is not None:
+            self._pool.shutdown(wait=False)
+            self._pool = None

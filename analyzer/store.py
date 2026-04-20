@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import sqlite3
 from pathlib import Path
@@ -214,6 +213,21 @@ class AnalyticsStore:
                 list(data.values()),
             )
 
+    def upsert_conversations_batch(self, data_list: list[dict]) -> None:
+        """Batch upsert conversations in a single transaction."""
+        if not data_list:
+            return
+        cols = list(data_list[0].keys())
+        placeholders = ", ".join("?" for _ in cols)
+        col_names = ", ".join(cols)
+        updates = ", ".join(f"{c} = excluded.{c}" for c in cols if c != "id")
+        sql = (
+            f"INSERT INTO conversations ({col_names}) VALUES ({placeholders})"
+            f" ON CONFLICT(id) DO UPDATE SET {updates}"
+        )
+        with self._get_conn() as conn:
+            conn.executemany(sql, [list(d.values()) for d in data_list])
+
     def upsert_prompt_template(
         self, template_id: str, system_prompt: str, data: dict
     ) -> None:
@@ -254,6 +268,66 @@ class AnalyticsStore:
                         template_id,
                     ),
                 )
+
+    def upsert_prompt_templates_batch(
+        self, templates: list[tuple[str, str, str | None, float | None]]
+    ) -> None:
+        """Batch upsert prompt templates in a single transaction.
+
+        Each tuple: ``(template_id, system_prompt, timestamp, cost_usd)``.
+        Pre-aggregates duplicates within the batch before hitting the DB.
+        """
+        if not templates:
+            return
+
+        # Pre-aggregate by template_id within the batch
+        agg: dict[str, dict] = {}
+        for template_id, system_prompt, timestamp, cost in templates:
+            cost = cost or 0.0
+            if template_id in agg:
+                entry = agg[template_id]
+                entry["count"] += 1
+                entry["total_cost"] += cost
+                if timestamp:
+                    if not entry["last_ts"] or timestamp > entry["last_ts"]:
+                        entry["last_ts"] = timestamp
+                    if not entry["first_ts"] or timestamp < entry["first_ts"]:
+                        entry["first_ts"] = timestamp
+            else:
+                agg[template_id] = {
+                    "system_prompt": system_prompt,
+                    "first_ts": timestamp,
+                    "last_ts": timestamp,
+                    "count": 1,
+                    "total_cost": cost,
+                }
+
+        sql = """INSERT INTO prompt_templates
+                   (template_id, system_prompt, first_seen, last_seen,
+                    use_count, total_cost_usd, avg_cost_usd)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(template_id) DO UPDATE SET
+                   last_seen = MAX(excluded.last_seen, prompt_templates.last_seen),
+                   use_count = prompt_templates.use_count + excluded.use_count,
+                   total_cost_usd = prompt_templates.total_cost_usd + excluded.total_cost_usd,
+                   avg_cost_usd = (prompt_templates.total_cost_usd + excluded.total_cost_usd)
+                                  / (prompt_templates.use_count + excluded.use_count)"""
+
+        rows = []
+        for template_id, entry in agg.items():
+            avg = entry["total_cost"] / entry["count"] if entry["count"] else 0.0
+            rows.append((
+                template_id,
+                entry["system_prompt"],
+                entry["first_ts"],
+                entry["last_ts"],
+                entry["count"],
+                entry["total_cost"],
+                avg,
+            ))
+
+        with self._get_conn() as conn:
+            conn.executemany(sql, rows)
 
     def refresh_daily_stats(self, date: str) -> None:
         """Rebuild daily_stats for the given date from conversations."""

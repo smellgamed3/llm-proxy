@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import json
 import logging
+
+import orjson
 
 from .base import BaseExtractor, ExtractionResult, classify_status
 from .utils import content_blocks_to_text
@@ -40,8 +41,8 @@ class AnthropicExtractor(BaseExtractor):
         req_data: dict = {}
         if request_body:
             try:
-                req_data = json.loads(request_body)
-            except json.JSONDecodeError:
+                req_data = orjson.loads(request_body)
+            except (orjson.JSONDecodeError, ValueError):
                 pass
 
         result.model = req_data.get("model")
@@ -67,11 +68,11 @@ class AnthropicExtractor(BaseExtractor):
         if status_code and status_code >= 400:
             if response_body:
                 try:
-                    err_data = json.loads(response_body)
+                    err_data = orjson.loads(response_body)
                     error_obj = err_data.get("error") if isinstance(err_data.get("error"), dict) else {}
                     result.error_type = error_obj.get("type") or err_data.get("type")
                     result.error_message = error_obj.get("message") or err_data.get("message")
-                except json.JSONDecodeError:
+                except (orjson.JSONDecodeError, ValueError):
                     result.error_message = response_body[:500]
             result.status = _classify_anthropic_status(request_type, status_code, result.error_type, result.error_message)
             return result
@@ -80,8 +81,8 @@ class AnthropicExtractor(BaseExtractor):
 
         if response_body:
             try:
-                data = json.loads(response_body)
-            except json.JSONDecodeError:
+                data = orjson.loads(response_body)
+            except (orjson.JSONDecodeError, ValueError):
                 return result
 
             usage = data.get("usage", {})
@@ -108,9 +109,8 @@ class AnthropicExtractor(BaseExtractor):
                         name = tu.get("name", "unknown")
                         inp = tu.get("input")
                         if inp:
-                            import json as _json
                             try:
-                                inp_str = _json.dumps(inp, ensure_ascii=False)
+                                inp_str = orjson.dumps(inp).decode()
                             except Exception:
                                 inp_str = str(inp)
                             parts.append(f"[tool_use] {name}({inp_str})")

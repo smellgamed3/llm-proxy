@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 import sqlite3
 import time
 from typing import Any, Callable
+
+import orjson
 
 from .body_reader import BodyReader
 from .config import AnalyzerConfig
@@ -15,6 +15,7 @@ from .extractors.base import BaseExtractor
 from .extractors.generic import GenericExtractor
 from .extractors.openai_compat import OpenAICompatExtractor
 from .fingerprint import Fingerprinter
+from .parallel import ParallelProcessor, process_record_cpu, resolve_num_workers
 from .store import AnalyticsStore
 
 logger = logging.getLogger("analyzer.worker")
@@ -42,14 +43,35 @@ class AnalyzerWorker:
             GenericExtractor(),
         ]
 
+        # Multi-process support
+        self._num_workers = resolve_num_workers(config.num_workers)
+        self._parallel: ParallelProcessor | None = None
+        if self._num_workers > 1:
+            self._parallel = ParallelProcessor(self._num_workers, config.pricing_file)
+            logger.info(
+                "Parallel processing enabled with %d workers", self._num_workers
+            )
+        else:
+            logger.info("Single-process mode")
+
     def run(self) -> None:
         if self.config.mode == "incremental":
             start_seq = self.analytics_store.get_watermark()
             logger.info("Incremental mode: resuming from seq %d", start_seq)
-            self._process_loop(start_seq)
+            try:
+                self._process_loop(start_seq)
+            finally:
+                self._shutdown_pool()
             return
 
-        self.run_once()
+        try:
+            self.run_once()
+        finally:
+            self._shutdown_pool()
+
+    def _shutdown_pool(self) -> None:
+        if self._parallel is not None:
+            self._parallel.shutdown()
 
     def run_once(self) -> dict[str, int]:
         if self.config.mode == "full":
@@ -67,14 +89,31 @@ class AnalyzerWorker:
 
     def _process_loop(self, start_seq: int) -> None:
         seq = start_seq
+        batch_size = self.config.batch_size or self.config.min_batch_size
+        poll_interval = self.config.min_poll_interval
+        
         while True:
-            batch = self._fetch_batch(seq)
+            batch = self._fetch_batch(seq, limit=batch_size)
             if not batch:
-                time.sleep(self.config.interval)
+                # No data: increase interval exponentially (backoff)
+                poll_interval = min(poll_interval * 1.5, self.config.max_poll_interval)
+                batch_size = self.config.min_batch_size
+                time.sleep(poll_interval)
                 continue
 
+            # Have data: reset interval and potentially grow batch size
+            poll_interval = self.config.min_poll_interval
             seq, processed = self._process_batch(batch, seq)
-            logger.debug("Processed batch of %d records, watermark now %d", processed, seq)
+            logger.debug(
+                "Processed batch of %d records, watermark now %d", processed, seq
+            )
+
+            # Adaptive sizing: if we filled the batch, try larger next time
+            if len(batch) == batch_size:
+                batch_size = min(batch_size * 2, self.config.max_batch_size)
+                logger.debug("Growing batch size to %d", batch_size)
+            else:
+                batch_size = self.config.min_batch_size
 
     def _process_available(self, start_seq: int) -> dict[str, int]:
         seq = start_seq
@@ -181,19 +220,50 @@ class AnalyzerWorker:
         seq = current_seq
         dates_to_refresh: set[str] = set()
         processed = 0
-        for record in batch:
-            if self._should_stop():
-                logger.info("Analyzer stop requested during batch at seq %s", seq)
-                break
-            try:
-                self._process_record(record, dates_to_refresh)
-                seq = record["seq"]
-                processed += 1
-            except Exception as e:
-                logger.error("Error processing record %s: %s", record.get("id"), e, exc_info=True)
-                seq = record["seq"]
-                processed += 1
 
+        # --- Step 1: Batch-read body files (I/O, main process) ---
+        body_refs: list[str] = []
+        for record in batch:
+            if record.get("request_body_ref"):
+                body_refs.append(record["request_body_ref"])
+            if record.get("response_body_ref"):
+                body_refs.append(record["response_body_ref"])
+
+        bodies = self.body_reader.read_batch(body_refs) if body_refs else {}
+
+        # --- Step 2: CPU processing (parallel or single-process) ---
+        tasks: list[tuple[dict, str | None, str | None]] = []
+        for record in batch:
+            req_body = bodies.get(record.get("request_body_ref")) if record.get("request_body_ref") else None
+            resp_body = bodies.get(record.get("response_body_ref")) if record.get("response_body_ref") else None
+            tasks.append((record, req_body, resp_body))
+
+        if self._parallel is not None:
+            results = self._parallel.process_batch(tasks)
+        else:
+            results = self._process_batch_single(tasks)
+
+        # --- Step 3: Batch-write results (I/O, main process) ---
+        conv_list: list[dict] = []
+        template_list: list[tuple[str, str, str | None, float | None]] = []
+
+        for i, result in enumerate(results):
+            record = batch[i]
+            seq = record["seq"]
+            processed += 1
+
+            if result is None:
+                logger.error("Failed to process record %s", record.get("id"))
+                continue
+
+            conv_list.append(result["conv_data"])
+            if result["template_info"]:
+                template_list.append(result["template_info"])
+            if result["date"]:
+                dates_to_refresh.add(result["date"])
+
+        self.analytics_store.upsert_conversations_batch(conv_list)
+        self.analytics_store.upsert_prompt_templates_batch(template_list)
         self.analytics_store.set_watermark(seq, processed)
 
         for date in dates_to_refresh:
@@ -204,7 +274,35 @@ class AnalyzerWorker:
 
         return seq, processed
 
-    def _fetch_batch(self, after_seq: int, until: str | None = None) -> list[dict]:
+    def _process_batch_single(
+        self, tasks: list[tuple[dict, str | None, str | None]]
+    ) -> list[dict[str, Any] | None]:
+        """Process tasks in the current process (single-process fallback)."""
+        results: list[dict[str, Any] | None] = []
+        for record, req_body, resp_body in tasks:
+            try:
+                result = process_record_cpu(
+                    record,
+                    req_body,
+                    resp_body,
+                    self.extractors,
+                    self.cost_calculator,
+                    self.fingerprinter,
+                )
+                results.append(result)
+            except Exception as e:
+                logger.error(
+                    "Error processing record %s: %s",
+                    record.get("id"),
+                    e,
+                    exc_info=True,
+                )
+                results.append(None)
+        return results
+
+    def _fetch_batch(self, after_seq: int, until: str | None = None, limit: int | None = None) -> list[dict]:
+        if limit is None:
+            limit = self.config.batch_size
         try:
             conn = sqlite3.connect(self.config.raw_db, timeout=10)
             conn.row_factory = sqlite3.Row
@@ -217,7 +315,7 @@ class AnalyzerWorker:
                 query += " AND timestamp <= ?"
                 params.append(until)
             query += " ORDER BY seq ASC LIMIT ?"
-            params.append(self.config.batch_size)
+            params.append(limit)
             rows = conn.execute(
                 query,
                 params,
@@ -227,99 +325,6 @@ class AnalyzerWorker:
         except Exception as e:
             logger.error("Failed to fetch batch: %s", e)
             return []
-
-    def _process_record(self, record: dict, dates_to_refresh: set[str]) -> None:
-        # Read request and response bodies
-        request_body = None
-        if record.get("request_body_ref"):
-            request_body = self.body_reader.read(record["request_body_ref"])
-
-        response_body = None
-        if record.get("response_body_ref"):
-            response_body = self.body_reader.read(record["response_body_ref"])
-
-        # Build request headers dict
-        request_headers: dict = {}
-        if record.get("request_headers"):
-            try:
-                request_headers = json.loads(record["request_headers"])
-            except Exception:
-                pass
-
-        # Select extractor
-        path = record.get("path", "")
-        method = record.get("method", "")
-        extractor = self._select_extractor(path, method, request_headers)
-        result = extractor.extract(record, request_body, response_body)
-
-        # Calculate cost
-        cost = self.cost_calculator.calculate(
-            result.model, result.prompt_tokens, result.completion_tokens
-        )
-
-        # Fingerprint
-        template_id = self.fingerprinter.fingerprint(result.system_prompt)
-
-        # Extract api_key_hash from raw record or compute from headers
-        api_key_hash = record.get("api_key_hash")
-        if not api_key_hash:
-            auth = request_headers.get("authorization") or request_headers.get("Authorization") or ""
-            if auth.lower().startswith("bearer "):
-                key = auth[7:].strip()
-            else:
-                key = (request_headers.get("x-api-key") or request_headers.get("X-Api-Key") or "").strip()
-            if key:
-                api_key_hash = hashlib.sha256(key.encode()).hexdigest()[:32]
-
-        # Build conversation data
-        timestamp = record.get("timestamp", "")
-        date = timestamp[:10] if timestamp else ""
-
-        tools_list_json = json.dumps(result.tools_list) if result.tools_list else None
-
-        conv_data: dict = {
-            "id": record["id"],
-            "seq": record.get("seq"),
-            "timestamp": timestamp,
-            "path": path,
-            "method": method,
-            "provider": result.provider,
-            "model": result.model,
-            "request_type": result.request_type,
-            "status": result.status,
-            "error_type": result.error_type,
-            "error_message": result.error_message,
-            "status_code": record.get("status_code"),
-            "is_stream": record.get("is_stream", 0),
-            "duration_ms": record.get("duration_ms"),
-            "client_ip": record.get("client_ip"),
-            "upstream_url": record.get("upstream_url"),
-            "prompt_tokens": result.prompt_tokens,
-            "completion_tokens": result.completion_tokens,
-            "total_tokens": result.total_tokens,
-            "cost_usd": cost,
-            "template_id": template_id,
-            "finish_reason": result.finish_reason,
-            "has_tools": 1 if result.has_tools else 0,
-            "tools_list": tools_list_json,
-            "messages_count": result.messages_count,
-            "temperature": result.temperature,
-            "max_tokens": result.max_tokens,
-            "system_prompt": result.system_prompt,
-            "user_prompt": result.user_prompt,
-            "assistant_response": result.assistant_response,
-            "api_key_hash": api_key_hash,
-        }
-
-        self.analytics_store.upsert_conversation(conv_data)
-
-        if template_id and result.system_prompt:
-            self.analytics_store.upsert_prompt_template(
-                template_id, result.system_prompt, conv_data
-            )
-
-        if date:
-            dates_to_refresh.add(date)
 
     def _select_extractor(
         self, path: str, method: str, headers: dict

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import json
 import logging
+
+import orjson
 
 from .base import BaseExtractor, ExtractionResult, classify_status
 from .utils import extract_last_role_text, looks_like_sse_payload, parse_sse_chunks, to_text
@@ -51,8 +52,8 @@ class OpenAICompatExtractor(BaseExtractor):
         req_data: dict = {}
         if request_body:
             try:
-                req_data = json.loads(request_body)
-            except json.JSONDecodeError:
+                req_data = orjson.loads(request_body)
+            except (orjson.JSONDecodeError, ValueError):
                 pass
 
         result.model = req_data.get("model")
@@ -86,11 +87,11 @@ class OpenAICompatExtractor(BaseExtractor):
         if status_code and status_code >= 400:
             if response_body:
                 try:
-                    err_data = json.loads(response_body)
+                    err_data = orjson.loads(response_body)
                     err = err_data.get("error", {})
                     result.error_type = err.get("type") if isinstance(err, dict) else str(err)
                     result.error_message = err.get("message") if isinstance(err, dict) else None
-                except json.JSONDecodeError:
+                except (orjson.JSONDecodeError, ValueError):
                     result.error_message = response_body[:500]
             result.status = classify_status(status_code, result.error_type, result.error_message)
             return result
@@ -107,8 +108,8 @@ class OpenAICompatExtractor(BaseExtractor):
 
     def _parse_sync_response(self, result: ExtractionResult, body: str, path: str) -> None:
         try:
-            data = json.loads(body)
-        except json.JSONDecodeError:
+            data = orjson.loads(body)
+        except (orjson.JSONDecodeError, ValueError):
             return
 
         usage = data.get("usage", {})

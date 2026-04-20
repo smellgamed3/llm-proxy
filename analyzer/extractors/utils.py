@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import json
+import orjson
 
 
 def parse_sse_chunks(text: str) -> list[dict]:
@@ -13,8 +13,8 @@ def parse_sse_chunks(text: str) -> list[dict]:
         if payload == "[DONE]":
             continue
         try:
-            chunks.append(json.loads(payload))
-        except json.JSONDecodeError:
+            chunks.append(orjson.loads(payload))
+        except (orjson.JSONDecodeError, ValueError):
             pass
     return chunks
 
