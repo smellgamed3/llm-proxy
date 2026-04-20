@@ -46,11 +46,6 @@ class AnalyzerWorker:
         # Multi-process support
         self._num_workers = resolve_num_workers(config.num_workers)
         self._parallel: ParallelProcessor | None = None
-        if self.stop_requested is not None and self._num_workers > 1:
-            # Background stop support relies on cooperative checks in-process.
-            # Keep this path single-process so test hooks and stop behavior remain deterministic.
-            logger.info("Stop-aware mode detected; forcing single-process execution")
-            self._num_workers = 1
         if self._num_workers > 1:
             self._parallel = ParallelProcessor(self._num_workers, config.pricing_file)
             logger.info(

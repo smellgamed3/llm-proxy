@@ -358,3 +358,82 @@ class TestWorkerSystemPromptFingerprint:
         assert len(templates) == 1
         assert templates[0]["use_count"] == 1
         assert "code reviewer" in templates[0]["system_prompt"]
+
+
+class TestWorkerParallelWithStop:
+    """Verify that providing stop_requested does NOT force single-process mode."""
+
+    def test_stop_callback_does_not_downgrade_to_single_process(
+        self, setup_dirs, tmp_path: Path
+    ):
+        """With num_workers=4 and stop_requested, parallel must stay enabled."""
+        raw_db, analytics_db, bodies_dir, pricing_file = setup_dirs
+        config = AnalyzerConfig(
+            raw_db=str(raw_db),
+            analytics_db=str(analytics_db),
+            bodies_dir=str(bodies_dir),
+            pricing_file=str(pricing_file),
+            mode="full",
+            num_workers=4,
+        )
+        stop_flag = False
+        worker = AnalyzerWorker(config, stop_requested=lambda: stop_flag)
+        try:
+            assert worker._num_workers == 4, (
+                "stop_requested must not downgrade explicit num_workers"
+            )
+            assert worker._parallel is not None, (
+                "ParallelProcessor must be initialised when num_workers > 1"
+            )
+        finally:
+            worker._shutdown_pool()
+
+    def test_auto_mode_with_stop_callback_uses_multiple_workers(
+        self, setup_dirs, tmp_path: Path
+    ):
+        """With num_workers=0 (auto) on a machine with >1 CPU, parallel must be used."""
+        from unittest.mock import patch
+
+        raw_db, analytics_db, bodies_dir, pricing_file = setup_dirs
+        config = AnalyzerConfig(
+            raw_db=str(raw_db),
+            analytics_db=str(analytics_db),
+            bodies_dir=str(bodies_dir),
+            pricing_file=str(pricing_file),
+            mode="full",
+            num_workers=0,  # auto
+        )
+        stop_flag = False
+        with patch("os.cpu_count", return_value=8):
+            worker = AnalyzerWorker(config, stop_requested=lambda: stop_flag)
+        try:
+            assert worker._num_workers == 7, (
+                "auto mode should yield cpu_count-1 workers regardless of stop_requested"
+            )
+            assert worker._parallel is not None
+        finally:
+            worker._shutdown_pool()
+
+    def test_stop_signal_respected_in_parallel_mode(self, setup_dirs, tmp_path: Path):
+        """Pre-set stop flag must cause run_once to return stopped=True even with parallel workers."""
+        raw_db, analytics_db, bodies_dir, pricing_file = setup_dirs
+        conn = _make_raw_db(raw_db)
+        _insert_request(conn, seq=1)
+        conn.commit()
+
+        config = AnalyzerConfig(
+            raw_db=str(raw_db),
+            analytics_db=str(analytics_db),
+            bodies_dir=str(bodies_dir),
+            pricing_file=str(pricing_file),
+            mode="full",
+            num_workers=2,
+            batch_size=10,
+        )
+        # Stop is pre-set — worker should bail before processing any batch
+        result = AnalyzerWorker(
+            config, stop_requested=lambda: True
+        ).run_once()
+        assert result.get("stopped") is True, (
+            "pre-set stop flag must return stopped=True in parallel mode"
+        )

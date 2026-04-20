@@ -169,6 +169,10 @@ def test_admin_start_background_sync(client: TestClient):
 
 
 def test_admin_stop_background_sync(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    # Force single-process so the _process_record monkey-patch takes effect.
+    # Stop-signal checking happens in the main process between batches regardless
+    # of num_workers; this test specifically exercises the stop-flag path.
+    monkeypatch.setenv("ANALYZER_NUM_WORKERS", "1")
     raw_db = os.environ["RAW_DB"]
     conn = sqlite3.connect(raw_db)
     for idx in range(2, 10):
