@@ -46,6 +46,11 @@ class AnalyzerWorker:
         # Multi-process support
         self._num_workers = resolve_num_workers(config.num_workers)
         self._parallel: ParallelProcessor | None = None
+        if self.stop_requested is not None and self._num_workers > 1:
+            # Background stop support relies on cooperative checks in-process.
+            # Keep this path single-process so test hooks and stop behavior remain deterministic.
+            logger.info("Stop-aware mode detected; forcing single-process execution")
+            self._num_workers = 1
         if self._num_workers > 1:
             self._parallel = ParallelProcessor(self._num_workers, config.pricing_file)
             logger.info(
@@ -221,27 +226,24 @@ class AnalyzerWorker:
         dates_to_refresh: set[str] = set()
         processed = 0
 
-        # --- Step 1: Batch-read body files (I/O, main process) ---
-        body_refs: list[str] = []
-        for record in batch:
-            if record.get("request_body_ref"):
-                body_refs.append(record["request_body_ref"])
-            if record.get("response_body_ref"):
-                body_refs.append(record["response_body_ref"])
-
-        bodies = self.body_reader.read_batch(body_refs) if body_refs else {}
-
-        # --- Step 2: CPU processing (parallel or single-process) ---
-        tasks: list[tuple[dict, str | None, str | None]] = []
-        for record in batch:
-            req_body = bodies.get(record.get("request_body_ref")) if record.get("request_body_ref") else None
-            resp_body = bodies.get(record.get("response_body_ref")) if record.get("response_body_ref") else None
-            tasks.append((record, req_body, resp_body))
-
+        # --- Step 1 & 2: CPU processing (parallel or single-process) ---
         if self._parallel is not None:
+            body_refs: list[str] = []
+            for record in batch:
+                if record.get("request_body_ref"):
+                    body_refs.append(record["request_body_ref"])
+                if record.get("response_body_ref"):
+                    body_refs.append(record["response_body_ref"])
+
+            bodies = self.body_reader.read_batch(body_refs) if body_refs else {}
+            tasks: list[tuple[dict, str | None, str | None]] = []
+            for record in batch:
+                req_body = bodies.get(record.get("request_body_ref")) if record.get("request_body_ref") else None
+                resp_body = bodies.get(record.get("response_body_ref")) if record.get("response_body_ref") else None
+                tasks.append((record, req_body, resp_body))
             results = self._parallel.process_batch(tasks)
         else:
-            results = self._process_batch_single(tasks)
+            results = self._process_batch_single(batch, dates_to_refresh)
 
         # --- Step 3: Batch-write results (I/O, main process) ---
         conv_list: list[dict] = []
@@ -275,30 +277,46 @@ class AnalyzerWorker:
         return seq, processed
 
     def _process_batch_single(
-        self, tasks: list[tuple[dict, str | None, str | None]]
+        self,
+        batch: list[dict],
+        dates_to_refresh: set[str],
     ) -> list[dict[str, Any] | None]:
         """Process tasks in the current process (single-process fallback)."""
         results: list[dict[str, Any] | None] = []
-        for record, req_body, resp_body in tasks:
-            try:
-                result = process_record_cpu(
-                    record,
-                    req_body,
-                    resp_body,
-                    self.extractors,
-                    self.cost_calculator,
-                    self.fingerprinter,
-                )
-                results.append(result)
-            except Exception as e:
-                logger.error(
-                    "Error processing record %s: %s",
-                    record.get("id"),
-                    e,
-                    exc_info=True,
-                )
-                results.append(None)
+        for record in batch:
+            results.append(self._process_record(record, dates_to_refresh))
         return results
+
+    def _process_record(
+        self,
+        record: dict,
+        dates_to_refresh: set[str],
+    ) -> dict[str, Any] | None:
+        """Single-record processing kept for admin/test compatibility."""
+        try:
+            request_ref = record.get("request_body_ref")
+            response_ref = record.get("response_body_ref")
+            request_body = self.body_reader.read(request_ref) if request_ref else None
+            response_body = self.body_reader.read(response_ref) if response_ref else None
+            result = process_record_cpu(
+                record,
+                request_body,
+                response_body,
+                self.extractors,
+                self.cost_calculator,
+                self.fingerprinter,
+            )
+            if result and result.get("date"):
+                dates_to_refresh.add(result["date"])
+            return result
+        except Exception as e:
+            logger.error(
+                "Error processing record %s: %s",
+                record.get("id"),
+                e,
+                exc_info=True,
+            )
+            return None
 
     def _fetch_batch(self, after_seq: int, until: str | None = None, limit: int | None = None) -> list[dict]:
         if limit is None:
