@@ -196,17 +196,52 @@ def process_record_cpu(
 # ---------------------------------------------------------------------------
 
 
+def _cpu_count_cgroup() -> int | None:
+    """Read CPU quota from cgroup v1/v2 (respects Docker --cpus limit)."""
+    for path in (
+        "/sys/fs/cgroup/cpu.max",              # cgroup v2
+        "/sys/fs/cgroup/cpu/cpu.cfs_quota_us",  # cgroup v1 quota
+    ):
+        try:
+            with open(path) as f:
+                content = f.read().strip()
+        except OSError:
+            continue
+        if path.endswith("cpu.max"):
+            parts = content.split()
+            quota = int(parts[0])
+            period = int(parts[1]) if len(parts) > 1 else 100000
+            if quota > 0:
+                return max(1, int(quota / period))
+        else:
+            quota = int(content)
+            if quota <= 0:
+                return None
+            try:
+                with open("/sys/fs/cgroup/cpu/cpu.cfs_period_us") as pf:
+                    period = int(pf.read().strip()) or 100000
+            except OSError:
+                period = 100000
+            return max(1, int(quota / period))
+    return None
+
+
+def _cpu_count() -> int:
+    """CPU count respecting Docker container cgroup limits."""
+    return _cpu_count_cgroup() or os.cpu_count() or 2
+
+
 def resolve_num_workers(configured: int) -> int:
     """Resolve the effective number of worker processes.
 
-    * ``0`` → auto: ``max(1, cpu_count - 1)``
+    * ``0`` → auto: ``max(1, cpu_count - 1)``, respecting container limits
     * ``1`` → single-process mode (no pool)
     * ``N`` → exactly N workers
     """
     if configured == 1:
         return 1
     if configured <= 0:
-        cpu = os.cpu_count() or 2
+        cpu = _cpu_count()
         return max(1, cpu - 1)
     return configured
 
