@@ -517,16 +517,58 @@ class AnalyticsStore:
     def reset(self) -> None:
         """Clear all analytics data in a single atomic transaction.
 
-        Avoids ``executescript()`` which issues an implicit COMMIT before
-        executing, potentially interfering with concurrent connections on
-        the same WAL-mode database.
+        Drops FTS triggers before deleting data to avoid running FTS5
+        'delete' commands against a potentially corrupted index.  Then
+        drops and recreates the FTS virtual table to ensure clean
+        internal structures.
         """
         with self._get_conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            # 1. Drop FTS triggers so DELETE FROM conversations does not
+            #    touch the (possibly corrupted) FTS5 index.
+            conn.execute("DROP TRIGGER IF EXISTS conv_fts_delete")
+            conn.execute("DROP TRIGGER IF EXISTS conv_fts_update")
+            conn.execute("DROP TRIGGER IF EXISTS conv_fts_insert")
+            # 2. Delete data – fast because no triggers fire.
             conn.execute("DELETE FROM conversations")
             conn.execute("DELETE FROM prompt_templates")
             conn.execute("DELETE FROM daily_stats")
-            conn.execute("UPDATE watermark SET seq = 0, processed = 0 WHERE id = 1")
+            conn.execute(
+                "UPDATE watermark SET seq = 0, processed = 0,"
+                " updated_at = datetime('now') WHERE id = 1"
+            )
+            # 3. Drop and recreate FTS table with a clean internal state.
+            conn.execute("DROP TABLE IF EXISTS conversations_fts")
+            conn.execute(
+                "CREATE VIRTUAL TABLE conversations_fts USING fts5("
+                "    user_prompt, system_prompt, assistant_response,"
+                "    content='conversations', content_rowid='rowid'"
+                ")"
+            )
+            # 4. Recreate triggers for future INSERT/UPDATE/DELETE.
+            conn.execute(
+                "CREATE TRIGGER conv_fts_insert AFTER INSERT ON conversations "
+                "BEGIN "
+                "    INSERT INTO conversations_fts(rowid, user_prompt, system_prompt, assistant_response) "
+                "    VALUES (new.rowid, new.user_prompt, new.system_prompt, new.assistant_response); "
+                "END"
+            )
+            conn.execute(
+                "CREATE TRIGGER conv_fts_delete AFTER DELETE ON conversations "
+                "BEGIN "
+                "    INSERT INTO conversations_fts(conversations_fts, rowid, user_prompt, system_prompt, assistant_response) "
+                "    VALUES ('delete', old.rowid, old.user_prompt, old.system_prompt, old.assistant_response); "
+                "END"
+            )
+            conn.execute(
+                "CREATE TRIGGER conv_fts_update AFTER UPDATE ON conversations "
+                "BEGIN "
+                "    INSERT INTO conversations_fts(conversations_fts, rowid, user_prompt, system_prompt, assistant_response) "
+                "    VALUES ('delete', old.rowid, old.user_prompt, old.system_prompt, old.assistant_response); "
+                "    INSERT INTO conversations_fts(rowid, user_prompt, system_prompt, assistant_response) "
+                "    VALUES (new.rowid, new.user_prompt, new.system_prompt, new.assistant_response); "
+                "END"
+            )
             conn.commit()
 
     def get_status(self) -> dict:

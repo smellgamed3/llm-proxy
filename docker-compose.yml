@@ -6,7 +6,7 @@ services:
     command: ["-listen=:8080", "-text={\"ok\":true}"]
 
   llm-proxy:
-    image: ghcr.io/smellgamed3/llm-proxy:${APP_VERSION:-1.9.2}
+    image: ghcr.io/smellgamed3/llm-proxy:${APP_VERSION:-1.9.3}
     pull_policy: always
     container_name: llm-proxy-prod
     restart: unless-stopped
@@ -44,7 +44,7 @@ services:
         hard: 65536
 
   analyzer:
-    image: ghcr.io/smellgamed3/llm-proxy-analyzer:${APP_VERSION:-1.9.2}
+    image: ghcr.io/smellgamed3/llm-proxy-analyzer:${APP_VERSION:-1.9.3}
     pull_policy: always
     container_name: llm-analyzer-prod
     restart: unless-stopped
@@ -72,7 +72,7 @@ services:
       - llm-proxy
 
   api:
-    image: ghcr.io/smellgamed3/llm-proxy-api:${APP_VERSION:-1.9.2}
+    image: ghcr.io/smellgamed3/llm-proxy-api:${APP_VERSION:-1.9.3}
     pull_policy: always
     container_name: llm-analytics-api-prod
     restart: unless-stopped
@@ -82,6 +82,7 @@ services:
       RAW_DB: /data/logs/raw.db
       ANALYTICS_DB: /data/analytics/analytics.db
       BODIES_DIR: /data/logs/bodies
+      BACKUP_DIR: /data/backups
       API_WORKERS: ${API_WORKERS:-2}
       API_RATE_LIMIT_ENABLED: ${API_RATE_LIMIT_ENABLED:-true}
       API_RATE_LIMIT_MAX_REQUESTS: ${API_RATE_LIMIT_MAX_REQUESTS:-300}
@@ -89,6 +90,7 @@ services:
     volumes:
       - llm-proxy-logs:/data/logs
       - llm-analytics:/data/analytics
+      - backups:/data/backups
     deploy:
       resources:
         limits:
@@ -106,4 +108,6 @@ volumes:
   llm-analytics:
     driver: local
   recorder-socket:
+    driver: local
+  backups:
     driver: local
