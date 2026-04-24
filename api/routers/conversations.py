@@ -152,7 +152,10 @@ def export_conversations(
     db: sqlite3.Connection = Depends(get_analytics_db),
     auth: AuthContext = Depends(resolve_auth),
 ):
-    """Export conversations as JSONL or CSV."""
+    """Export conversations as JSONL or CSV.
+
+    使用 fetchmany() 分批流式输出，避免一次性加载全部行到内存。
+    """
     if fmt not in ("jsonl", "csv"):
         raise HTTPException(status_code=400, detail="fmt must be jsonl or csv")
 
@@ -167,7 +170,7 @@ def export_conversations(
     )
     safe_limit = min(limit, 50000)
 
-    rows = db.execute(
+    cursor = db.execute(
         f"""SELECT id, timestamp, path, model, provider, request_type,
                    status, error_type, status_code, is_stream, duration_ms,
                    prompt_tokens, completion_tokens, total_tokens, cost_usd,
@@ -176,12 +179,16 @@ def export_conversations(
             FROM conversations {filters.where_sql}
             ORDER BY timestamp DESC LIMIT ?""",
         filters.params + [safe_limit],
-    ).fetchall()
+    )
 
     if fmt == "jsonl":
         def generate_jsonl():
-            for row in rows:
-                yield json.dumps(dict(row), ensure_ascii=False) + "\n"
+            while True:
+                batch = cursor.fetchmany(1000)
+                if not batch:
+                    break
+                for row in batch:
+                    yield json.dumps(dict(row), ensure_ascii=False) + "\n"
 
         return StreamingResponse(
             generate_jsonl(),
@@ -189,16 +196,33 @@ def export_conversations(
             headers={"Content-Disposition": "attachment; filename=conversations.jsonl"},
         )
     else:
-        buf = io.StringIO()
-        if rows:
-            fieldnames = list(dict(rows[0]).keys())
+        def generate_csv():
+            first_batch = cursor.fetchmany(1000)
+            if not first_batch:
+                yield ""
+                return
+            fieldnames = list(dict(first_batch[0]).keys())
+            buf = io.StringIO()
             writer = csv.DictWriter(buf, fieldnames=fieldnames)
             writer.writeheader()
-            for row in rows:
+            yield buf.getvalue()
+            for row in first_batch:
+                buf = io.StringIO()
+                writer = csv.DictWriter(buf, fieldnames=fieldnames)
                 writer.writerow(dict(row))
+                yield buf.getvalue()
+            while True:
+                batch = cursor.fetchmany(1000)
+                if not batch:
+                    break
+                for row in batch:
+                    buf = io.StringIO()
+                    writer = csv.DictWriter(buf, fieldnames=fieldnames)
+                    writer.writerow(dict(row))
+                    yield buf.getvalue()
 
         return StreamingResponse(
-            iter([buf.getvalue()]),
+            generate_csv(),
             media_type="text/csv",
             headers={"Content-Disposition": "attachment; filename=conversations.csv"},
         )

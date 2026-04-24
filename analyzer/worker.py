@@ -43,6 +43,9 @@ class AnalyzerWorker:
             GenericExtractor(),
         ]
 
+        # 持久 raw.db 连接，避免每轮轮询重新 connect + close
+        self._raw_conn: sqlite3.Connection | None = None
+
         # Multi-process support
         self._num_workers = resolve_num_workers(config.num_workers)
         self._parallel: ParallelProcessor | None = None
@@ -62,12 +65,14 @@ class AnalyzerWorker:
                 self._process_loop(start_seq)
             finally:
                 self._shutdown_pool()
+                self._close_raw_conn()
             return
 
         try:
             self.run_once()
         finally:
             self._shutdown_pool()
+            self._close_raw_conn()
 
     def _shutdown_pool(self) -> None:
         if self._parallel is not None:
@@ -173,8 +178,7 @@ class AnalyzerWorker:
 
     def _describe_workload(self, start_seq: int, until: str | None = None) -> dict[str, int]:
         try:
-            conn = sqlite3.connect(self.config.raw_db, timeout=10)
-            conn.row_factory = sqlite3.Row
+            conn = self._get_raw_conn()
             query = (
                 "SELECT COUNT(*) AS total_rows, MAX(seq) AS target_seq "
                 "FROM raw_requests WHERE seq > ? AND status_code IS NOT NULL"
@@ -184,7 +188,6 @@ class AnalyzerWorker:
                 query += " AND timestamp <= ?"
                 params.append(until)
             row = conn.execute(query, params).fetchone()
-            conn.close()
             return {
                 "total_rows": int(row["total_rows"] or 0) if row else 0,
                 "target_seq": int(row["target_seq"] or start_seq) if row else start_seq,
@@ -344,15 +347,26 @@ class AnalyzerWorker:
             )
             return None
 
+    def _get_raw_conn(self) -> sqlite3.Connection:
+        """复用持久 raw.db 连接，避免每轮轮询重新 connect + close。"""
+        if self._raw_conn is None:
+            conn = sqlite3.connect(self.config.raw_db, timeout=10)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            self._raw_conn = conn
+        return self._raw_conn
+
+    def _close_raw_conn(self) -> None:
+        if self._raw_conn is not None:
+            self._raw_conn.close()
+            self._raw_conn = None
+
     def _fetch_batch(self, after_seq: int, until: str | None = None, limit: int | None = None) -> list[dict]:
         if limit is None:
             limit = self.config.batch_size
         try:
-            conn = sqlite3.connect(self.config.raw_db, timeout=10)
-            conn.row_factory = sqlite3.Row
-            # Only process finalized HTTP records. If we analyze rows before
-            # record_response updates status/body refs, conversation fields can be
-            # permanently empty because watermark moves past them.
+            conn = self._get_raw_conn()
             query = """SELECT * FROM raw_requests WHERE seq > ? AND status_code IS NOT NULL"""
             params: list[object] = [after_seq]
             if until:
@@ -364,7 +378,6 @@ class AnalyzerWorker:
                 query,
                 params,
             ).fetchall()
-            conn.close()
             return [dict(r) for r in rows]
         except Exception as e:
             logger.error("Failed to fetch batch: %s", e)
@@ -383,13 +396,11 @@ class AnalyzerWorker:
         if not since:
             return 0
         try:
-            conn = sqlite3.connect(self.config.raw_db, timeout=10)
-            conn.row_factory = sqlite3.Row
+            conn = self._get_raw_conn()
             row = conn.execute(
                 "SELECT MIN(seq) FROM raw_requests WHERE timestamp >= ?",
                 (since,),
             ).fetchone()
-            conn.close()
             if row and row[0] is not None:
                 return row[0] - 1
         except Exception as e:

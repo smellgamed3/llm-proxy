@@ -103,27 +103,41 @@ def get_latency_distribution(
     db: sqlite3.Connection = Depends(get_analytics_db),
     auth: AuthContext = Depends(resolve_auth),
 ) -> list[dict]:
-    """Return latency distribution in buckets for histogram."""
+    """Return latency distribution in buckets for histogram.
+
+    使用单次 CASE WHEN 查询替代 N 次独立 COUNT，避免全表扫描 N 次。
+    """
     filters = SqlWhereBuilder().add_auth(auth)
     filters.add("duration_ms IS NOT NULL")
     filters.add("model = ?", model, enabled=bool(model))
 
-    buckets = [0, 100, 250, 500, 1000, 2000, 5000, 10000, 30000, 60000]
-    result = []
-    for i in range(len(buckets)):
-        lo = buckets[i]
-        hi = buckets[i + 1] if i + 1 < len(buckets) else None
+    # 桶边界: [0, 100), [100, 250), ..., [30000, 60000), [60000, +∞)
+    boundaries = [0, 100, 250, 500, 1000, 2000, 5000, 10000, 30000, 60000]
+
+    # 构建 CASE WHEN 子句
+    case_clauses = []
+    for i in range(len(boundaries)):
+        lo = boundaries[i]
+        hi = boundaries[i + 1] if i + 1 < len(boundaries) else None
         if hi is not None:
-            count = db.execute(
-                f"SELECT COUNT(*) FROM conversations {filters.where_sql} AND duration_ms >= ? AND duration_ms < ?",
-                filters.params + [lo, hi],
-            ).fetchone()[0]
-            label = f"{lo}-{hi}ms"
+            case_clauses.append(
+                f"COALESCE(SUM(CASE WHEN duration_ms >= {lo} AND duration_ms < {hi} THEN 1 ELSE 0 END), 0) AS b_{i}"
+            )
         else:
-            count = db.execute(
-                f"SELECT COUNT(*) FROM conversations {filters.where_sql} AND duration_ms >= ?",
-                filters.params + [lo],
-            ).fetchone()[0]
-            label = f"{lo}ms+"
+            case_clauses.append(
+                f"COALESCE(SUM(CASE WHEN duration_ms >= {lo} THEN 1 ELSE 0 END), 0) AS b_{i}"
+            )
+
+    row = db.execute(
+        f"SELECT {', '.join(case_clauses)} FROM conversations {filters.where_sql}",
+        filters.params,
+    ).fetchone()
+
+    result: list[dict] = []
+    for i in range(len(boundaries)):
+        lo = boundaries[i]
+        hi = boundaries[i + 1] if i + 1 < len(boundaries) else None
+        label = f"{lo}-{hi}ms" if hi is not None else f"{lo}ms+"
+        count = row[f"b_{i}"] if row else 0
         result.append({"bucket": label, "count": count})
     return result

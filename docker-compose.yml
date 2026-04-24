@@ -6,7 +6,7 @@ services:
     command: ["-listen=:8080", "-text={\"ok\":true}"]
 
   llm-proxy:
-    image: ghcr.io/smellgamed3/llm-proxy:${APP_VERSION:-1.8.0}
+    image: ghcr.io/smellgamed3/llm-proxy:${APP_VERSION:-1.9.1}
     pull_policy: always
     container_name: llm-proxy-prod
     restart: unless-stopped
@@ -44,7 +44,7 @@ services:
         hard: 65536
 
   analyzer:
-    image: ghcr.io/smellgamed3/llm-proxy-analyzer:${APP_VERSION:-1.8.0}
+    image: ghcr.io/smellgamed3/llm-proxy-analyzer:${APP_VERSION:-1.9.1}
     pull_policy: always
     container_name: llm-analyzer-prod
     restart: unless-stopped
@@ -72,7 +72,7 @@ services:
       - llm-proxy
 
   api:
-    image: ghcr.io/smellgamed3/llm-proxy-api:${APP_VERSION:-1.8.0}
+    image: ghcr.io/smellgamed3/llm-proxy-api:${APP_VERSION:-1.9.1}
     pull_policy: always
     container_name: llm-analytics-api-prod
     restart: unless-stopped

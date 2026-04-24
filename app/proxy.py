@@ -184,7 +184,7 @@ class ProxyHandler:
         self.client = httpx.AsyncClient(
             base_url=config.upstream_url,
             timeout=httpx.Timeout(connect=10, read=300, write=30, pool=10),
-            limits=httpx.Limits(max_connections=200, max_keepalive_connections=50),
+            limits=httpx.Limits(max_connections=500, max_keepalive_connections=100),
             follow_redirects=False,
             http2=True,
         )
