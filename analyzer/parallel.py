@@ -209,6 +209,8 @@ def _cpu_count_cgroup() -> int | None:
             continue
         if path.endswith("cpu.max"):
             parts = content.split()
+            if parts and parts[0] in ("max", "-1"):
+                return None  # no CPU limit set
             quota = int(parts[0])
             period = int(parts[1]) if len(parts) > 1 else 100000
             if quota > 0:
