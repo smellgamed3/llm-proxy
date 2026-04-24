@@ -104,6 +104,9 @@ def upstream_ws_server():
 
 def make_ws_proxy_app(upstream_url: str, tmp_path: Path,
                       recording_filter: RecordingFilter | None = None) -> tuple[Starlette, Recorder]:
+    import os
+    os.environ["RECORDER_SYNC"] = "1"
+
     cfg = Config(
         upstream_url=upstream_url,
         log_dir=str(tmp_path / "logs"),

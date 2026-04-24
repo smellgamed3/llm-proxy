@@ -37,6 +37,9 @@ def make_proxy_with_upstream(
     preserve_host: bool = True,
 ) -> tuple[TestClient, TestClient, Recorder]:
     """Return (proxy_client, upstream_client, recorder)."""
+    import os
+    os.environ["RECORDER_SYNC"] = "1"
+
     upstream_client = TestClient(upstream_app, raise_server_exceptions=True)
 
     log_dir = str(tmp_path / "logs")
