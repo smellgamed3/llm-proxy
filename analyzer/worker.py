@@ -79,7 +79,8 @@ class AnalyzerWorker:
             self._parallel.shutdown()
 
     def run_once(self) -> dict[str, int]:
-        if self.config.mode == "full":
+        was_full = self.config.mode == "full"
+        if was_full:
             logger.info("Full mode: resetting analytics store")
             self.analytics_store.reset()
             start_seq = 0
@@ -90,7 +91,12 @@ class AnalyzerWorker:
             start_seq = self.analytics_store.get_watermark()
             logger.info("Run-once incremental catch-up from seq %d", start_seq)
 
-        return self._process_available(start_seq)
+        result = self._process_available(start_seq)
+
+        if was_full:
+            logger.info("Full mode: rebuilding FTS index")
+            self.analytics_store.rebuild_fts()
+        return result
 
     def _process_loop(self, start_seq: int) -> None:
         seq = start_seq
