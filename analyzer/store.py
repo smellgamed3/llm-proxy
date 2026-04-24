@@ -29,8 +29,9 @@ class AnalyticsStore:
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA cache_size=-65536")       # 64 MB page cache
             conn.execute("PRAGMA mmap_size=268435456")     # 256 MB mmap read
-            conn.execute("PRAGMA wal_autocheckpoint=4000") # checkpoint every ~16 MB WAL
+            conn.execute("PRAGMA wal_autocheckpoint=8000") # checkpoint every ~32 MB WAL (large enough for full reset)
             conn.execute("PRAGMA temp_store=MEMORY")
+            conn.execute("PRAGMA busy_timeout=300000")     # 5 min timeout for long operations
             conn.row_factory = sqlite3.Row
             self._conn = conn
         return self._conn
@@ -514,14 +515,20 @@ class AnalyticsStore:
             conn.executemany(sql, rows)
 
     def reset(self) -> None:
-        """Clear all analytics data."""
+        """Clear all analytics data in a single atomic transaction.
+
+        Avoids ``executescript()`` which issues an implicit COMMIT before
+        executing, potentially interfering with concurrent connections on
+        the same WAL-mode database.
+        """
         with self._get_conn() as conn:
-            conn.executescript("""
-                DELETE FROM conversations;
-                DELETE FROM prompt_templates;
-                DELETE FROM daily_stats;
-                UPDATE watermark SET seq = 0, processed = 0 WHERE id = 1;
-            """)
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("DELETE FROM conversations_fts")  # clear FTS index first
+            conn.execute("DELETE FROM conversations")
+            conn.execute("DELETE FROM prompt_templates")
+            conn.execute("DELETE FROM daily_stats")
+            conn.execute("UPDATE watermark SET seq = 0, processed = 0 WHERE id = 1")
+            conn.commit()
 
     def get_status(self) -> dict:
         with self._get_conn() as conn:

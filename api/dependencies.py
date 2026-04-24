@@ -16,6 +16,8 @@ def _make_pooled_conn(db_path: str) -> sqlite3.Connection:
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA cache_size=-65536")
     conn.execute("PRAGMA mmap_size=268435456")
+    conn.execute("PRAGMA wal_autocheckpoint=8000")  # match AnalyzerStore, avoid premature checkpoints
+    conn.execute("PRAGMA busy_timeout=300000")       # 5 min timeout for concurrent access
     conn.execute("PRAGMA temp_store=MEMORY")
     conn.row_factory = sqlite3.Row
     return conn

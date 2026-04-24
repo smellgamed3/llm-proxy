@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import sqlite3
@@ -17,6 +18,7 @@ from analyzer.worker import AnalyzerWorker
 from analyzer.store import AnalyticsStore
 from api.dependencies import get_analytics_db, get_bodies_dir, get_raw_db, resolve_auth, AuthContext
 
+logger = logging.getLogger("llm-proxy.api.admin")
 router = APIRouter(tags=["admin"])
 
 
@@ -105,79 +107,112 @@ class AnalyzerSyncManager:
 
     def _run_job(self, payload: dict[str, Any]) -> None:
         request = RerunRequest(**payload)
+        max_retries = 1
+        for attempt in range(max_retries + 1):
+            try:
+                self._run_job_once(request)
+                break
+            except Exception as exc:
+                error_msg = str(exc)
+                is_transient = (
+                    "database disk image is malformed" in error_msg
+                    or "database is locked" in error_msg
+                    or "malformed" in error_msg.lower()
+                )
+                is_last_attempt = attempt >= max_retries
+                if is_transient and not is_last_attempt:
+                    logger.warning(
+                        "Sync job transient error (attempt %d/%d): %s — retrying",
+                        attempt + 1, max_retries + 1, error_msg,
+                    )
+                    self._recover_store_connection()
+                    continue
+                self._fail_job(error_msg)
+
+    def _recover_store_connection(self) -> None:
+        """Close and reopen the store connection to recover from transient errors."""
         try:
-            config = load_analyzer_config()
-            config.mode = request.mode
-            config.since = request.since
-            config.until = request.until
-            result = AnalyzerWorker(
-                config,
-                progress_callback=self._update_progress,
-                stop_requested=self._stop_event.is_set,
-            ).run_once()
-            with self._lock:
-                total_rows = int(result.get("total_rows") or self._state.get("total_rows") or 0)
-                processed_rows = int(result.get("processed") or self._state.get("processed_rows") or 0)
-                remaining_rows = max(total_rows - processed_rows, 0)
-                stopped = bool(result.get("stopped"))
-                final_status = "stopped" if stopped else "completed"
-                progress = 1.0 if total_rows == 0 and not stopped else (0.0 if total_rows == 0 else min(processed_rows / total_rows, 1.0))
-                finished_at = datetime.now(timezone.utc).isoformat()
-                self._state.update(
-                    {
-                        "status": final_status,
-                        "is_running": False,
-                        "progress": progress,
-                        "processed_rows": processed_rows,
-                        "total_rows": total_rows,
-                        "remaining_rows": remaining_rows,
-                        "current_seq": int(result.get("last_seq") or self._state.get("current_seq") or 0),
-                        "target_seq": int(result.get("target_seq") or self._state.get("target_seq") or 0),
-                        "finished_at": finished_at,
-                        "error": None,
-                    }
+            if self._store._conn is not None:
+                self._store._conn.close()
+                self._store._conn = None
+            self._store._get_conn().execute("PRAGMA integrity_check")
+        except Exception as e:
+            logger.warning("Store connection recovery attempt failed: %s", e)
+
+    def _run_job_once(self, request: RerunRequest) -> None:
+        config = load_analyzer_config()
+        config.mode = request.mode
+        config.since = request.since
+        config.until = request.until
+        result = AnalyzerWorker(
+            config,
+            progress_callback=self._update_progress,
+            stop_requested=self._stop_event.is_set,
+        ).run_once()
+        with self._lock:
+            total_rows = int(result.get("total_rows") or self._state.get("total_rows") or 0)
+            processed_rows = int(result.get("processed") or self._state.get("processed_rows") or 0)
+            remaining_rows = max(total_rows - processed_rows, 0)
+            stopped = bool(result.get("stopped"))
+            final_status = "stopped" if stopped else "completed"
+            progress = 1.0 if total_rows == 0 and not stopped else (0.0 if total_rows == 0 else min(processed_rows / total_rows, 1.0))
+            finished_at = datetime.now(timezone.utc).isoformat()
+            self._state.update(
+                {
+                    "status": final_status,
+                    "is_running": False,
+                    "progress": progress,
+                    "processed_rows": processed_rows,
+                    "total_rows": total_rows,
+                    "remaining_rows": remaining_rows,
+                    "current_seq": int(result.get("last_seq") or self._state.get("current_seq") or 0),
+                    "target_seq": int(result.get("target_seq") or self._state.get("target_seq") or 0),
+                    "finished_at": finished_at,
+                    "error": None,
+                }
+            )
+            if self._state["job_id"] is not None:
+                self._store.update_sync_job(
+                    int(self._state["job_id"]),
+                    status=final_status,
+                    progress=progress,
+                    processed_rows=processed_rows,
+                    total_rows=total_rows,
+                    remaining_rows=remaining_rows,
+                    current_seq=self._state["current_seq"],
+                    target_seq=self._state["target_seq"],
+                    last_timestamp=self._state.get("last_timestamp"),
+                    finished_at=finished_at,
+                    error=None,
+                    stop_requested=1 if self._state.get("stop_requested") else 0,
                 )
-                if self._state["job_id"] is not None:
-                    self._store.update_sync_job(
-                        int(self._state["job_id"]),
-                        status=final_status,
-                        progress=progress,
-                        processed_rows=processed_rows,
-                        total_rows=total_rows,
-                        remaining_rows=remaining_rows,
-                        current_seq=self._state["current_seq"],
-                        target_seq=self._state["target_seq"],
-                        last_timestamp=self._state.get("last_timestamp"),
-                        finished_at=finished_at,
-                        error=None,
-                        stop_requested=1 if self._state.get("stop_requested") else 0,
-                    )
-        except Exception as exc:
-            with self._lock:
-                finished_at = datetime.now(timezone.utc).isoformat()
-                self._state.update(
-                    {
-                        "status": "failed",
-                        "is_running": False,
-                        "finished_at": finished_at,
-                        "error": str(exc),
-                    }
+
+    def _fail_job(self, error_msg: str) -> None:
+        with self._lock:
+            finished_at = datetime.now(timezone.utc).isoformat()
+            self._state.update(
+                {
+                    "status": "failed",
+                    "is_running": False,
+                    "finished_at": finished_at,
+                    "error": error_msg,
+                }
+            )
+            if self._state["job_id"] is not None:
+                self._store.update_sync_job(
+                    int(self._state["job_id"]),
+                    status="failed",
+                    progress=self._state.get("progress") or 0.0,
+                    processed_rows=self._state.get("processed_rows") or 0,
+                    total_rows=self._state.get("total_rows") or 0,
+                    remaining_rows=self._state.get("remaining_rows") or 0,
+                    current_seq=self._state.get("current_seq") or 0,
+                    target_seq=self._state.get("target_seq") or 0,
+                    last_timestamp=self._state.get("last_timestamp"),
+                    finished_at=finished_at,
+                    error=error_msg,
+                    stop_requested=1 if self._state.get("stop_requested") else 0,
                 )
-                if self._state["job_id"] is not None:
-                    self._store.update_sync_job(
-                        int(self._state["job_id"]),
-                        status="failed",
-                        progress=self._state.get("progress") or 0.0,
-                        processed_rows=self._state.get("processed_rows") or 0,
-                        total_rows=self._state.get("total_rows") or 0,
-                        remaining_rows=self._state.get("remaining_rows") or 0,
-                        current_seq=self._state.get("current_seq") or 0,
-                        target_seq=self._state.get("target_seq") or 0,
-                        last_timestamp=self._state.get("last_timestamp"),
-                        finished_at=finished_at,
-                        error=str(exc),
-                        stop_requested=1 if self._state.get("stop_requested") else 0,
-                    )
 
     def stop(self) -> dict[str, Any]:
         with self._lock:
