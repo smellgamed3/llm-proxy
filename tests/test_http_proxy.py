@@ -385,6 +385,7 @@ class TestHTTPRecording:
         client, _, rec = make_proxy_with_upstream(tmp_path, upstream)
 
         client.post("/v1/chat/completions", json={"model": "gpt-4"})
+        rec.flush()
         rows = db_rows(rec, "raw_requests")
         assert len(rows) == 1
         assert rows[0]["path"] == "/v1/chat/completions"
@@ -413,6 +414,7 @@ class TestHTTPRecording:
         client, _, rec = make_proxy_with_upstream(tmp_path, upstream)
 
         client.post("/v1/chat", json={"model": "claude-3"})
+        rec.flush()
         bodies = jsonl_bodies(rec)
         req_bodies = [b for b in bodies if b["ref"].endswith(":request")]
         assert any("claude-3" in b["data"] for b in req_bodies)
@@ -452,6 +454,7 @@ class TestRecordingFilter:
 
         client.get("/v1/chat/completions")
         client.get("/v1/models")  # not in include
+        rec.flush()
         rows = db_rows(rec, "raw_requests")
         assert len(rows) == 1
         assert rows[0]["path"] == "/v1/chat/completions"
@@ -493,6 +496,7 @@ class TestSSEProxy:
         client, _, rec = make_proxy_with_upstream(tmp_path, upstream)
 
         client.post("/v1/chat/completions", json={"model": "gpt-4", "stream": True})
+        rec.flush()
         rows = db_rows(rec, "raw_requests")
         assert rows[0]["is_stream"] == 1
         bodies = jsonl_bodies(rec)

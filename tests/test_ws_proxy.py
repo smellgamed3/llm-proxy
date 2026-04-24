@@ -161,6 +161,7 @@ class TestWSRecording:
         client = TestClient(app)
         with client.websocket_connect("/ws/realtime") as ws:
             ws.receive_text()
+        rec.flush()
         rows = db_rows(rec, "raw_ws_connections")
         assert len(rows) == 1
         assert rows[0]["path"] == "/ws/realtime"
@@ -173,6 +174,7 @@ class TestWSRecording:
             ws.send_text("test-message")
             ws.receive_text()  # echo (server→client)
 
+        rec.flush()
         msgs = db_rows(rec, "raw_ws_messages")
         directions = {m["direction"] for m in msgs}
         assert "client_to_server" in directions
