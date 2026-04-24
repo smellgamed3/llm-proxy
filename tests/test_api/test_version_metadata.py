@@ -17,11 +17,14 @@ def test_version_is_consistent_across_public_surfaces() -> None:
     assert match, "pyproject version not found"
     version = match.group(1)
 
-    api_app = _read("api/app.py")
+    # api/app.py 从 pyproject.toml 动态读取，运行时验证一致性
+    from api.app import APP_VERSION
+    assert APP_VERSION == version, f"APP_VERSION ({APP_VERSION}) != pyproject ({version})"
+
+    # 仪表盘 JS 的版本显示，测试确保同步
     dashboard_js = _read("api/static/app.js")
     readme = _read("README.md")
 
-    assert f'version="{version}"' in api_app
     assert f"APP_VERSION = 'v{version}'" in dashboard_js
     assert f'当前版本：`{version}`' in readme
     assert f'version = "{version}"' in pyproject

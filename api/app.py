@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from pathlib import Path
 import time
 
@@ -18,9 +19,21 @@ from .rate_limit import RateLimitMiddleware
 logger = logging.getLogger("llm-proxy.api")
 
 
+def _read_version() -> str:
+    """从 pyproject.toml 读取版本号（唯一版本源）。"""
+    pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+    match = re.search(r'^version = "([^"]+)"', pyproject, re.MULTILINE)
+    if not match:
+        return "0.0.0"
+    return match.group(1)
+
+
+APP_VERSION = _read_version()
+
+
 def create_app() -> FastAPI:
     configure_logging(service_name="api", level=os.getenv("LOG_LEVEL", "INFO"))
-    app = FastAPI(title="LLM Proxy Analytics API", version="1.8.0")
+    app = FastAPI(title="LLM Proxy Analytics API", version=APP_VERSION)
     app.state.analyzer_sync_manager = admin.AnalyzerSyncManager()
     app.add_middleware(RateLimitMiddleware)
 
