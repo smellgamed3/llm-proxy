@@ -523,7 +523,6 @@ class AnalyticsStore:
         """
         with self._get_conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            conn.execute("DELETE FROM conversations_fts")  # clear FTS index first
             conn.execute("DELETE FROM conversations")
             conn.execute("DELETE FROM prompt_templates")
             conn.execute("DELETE FROM daily_stats")
