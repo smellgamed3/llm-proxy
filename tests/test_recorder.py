@@ -17,8 +17,11 @@ from tests.conftest import db_rows, jsonl_bodies, jsonl_manifest
 
 @pytest.fixture
 def rec(tmp_path: Path) -> Recorder:
+    import os
+    os.environ["RECORDER_SYNC"] = "1"
     cfg = Config(log_dir=str(tmp_path / "logs"))
-    return Recorder(cfg)
+    yield Recorder(cfg)
+    os.environ.pop("RECORDER_SYNC", None)
 
 
 class TestSeqGenerator:

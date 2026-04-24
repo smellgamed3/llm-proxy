@@ -330,7 +330,6 @@ class AnalyticsStore:
             conn.executemany(sql, rows)
 
     def refresh_daily_stats(self, date: str) -> None:
-        """Rebuild daily_stats for the given date from conversations."""
         with self._get_conn() as conn:
             conn.execute("DELETE FROM daily_stats WHERE date = ?", (date,))
             conn.execute(
@@ -354,6 +353,24 @@ class AnalyticsStore:
                    GROUP BY date(timestamp), model, provider""",
                 (date,),
             )
+
+    def increment_daily_stats_batch(self, rows: list[tuple]) -> None:
+        sql = """INSERT INTO daily_stats
+                   (date, model, provider, request_count, success_count, error_count,
+                    total_tokens, prompt_tokens, completion_tokens, total_cost_usd, avg_duration_ms)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(date, model, provider) DO UPDATE SET
+                   request_count = request_count + excluded.request_count,
+                   success_count = success_count + excluded.success_count,
+                   error_count = error_count + excluded.error_count,
+                   total_tokens = total_tokens + excluded.total_tokens,
+                   prompt_tokens = prompt_tokens + excluded.prompt_tokens,
+                   completion_tokens = completion_tokens + excluded.completion_tokens,
+                   total_cost_usd = total_cost_usd + excluded.total_cost_usd,
+                   avg_duration_ms = (avg_duration_ms * request_count + excluded.avg_duration_ms * excluded.request_count)
+                                     / (request_count + excluded.request_count)"""
+        with self._get_conn() as conn:
+            conn.executemany(sql, rows)
 
     def reset(self) -> None:
         """Clear all analytics data."""

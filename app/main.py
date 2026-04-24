@@ -49,6 +49,7 @@ def create_app(config: Config | None = None) -> Starlette:
 
     async def on_shutdown():
         logger.info("Shutting down LLM Proxy")
+        recorder.shutdown()
         await http_proxy.close()
 
     HTTP_METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"]

@@ -21,7 +21,7 @@ import hashlib
 import logging
 import multiprocessing as mp
 import os
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Any
 
 import orjson
@@ -221,7 +221,7 @@ class ParallelProcessor:
 
     def _ensure_pool(self) -> ProcessPoolExecutor:
         if self._pool is None:
-            ctx = mp.get_context("fork")
+            ctx = mp.get_context("spawn")
             self._pool = ProcessPoolExecutor(
                 max_workers=self.num_workers,
                 mp_context=ctx,
@@ -234,23 +234,21 @@ class ParallelProcessor:
         self,
         tasks: list[tuple[dict, str | None, str | None]],
     ) -> list[dict[str, Any] | None]:
-        """Submit *tasks* to the pool and return results in order.
-
-        Each task is ``(record, request_body, response_body)``.
-        Returns a list of result dicts (or None for failed records).
-        """
         pool = self._ensure_pool()
-        futures = [pool.submit(_process_record_in_worker, t) for t in tasks]
-        results: list[dict[str, Any] | None] = []
-        for fut in futures:
+        indexed_futures = {
+            pool.submit(_process_record_in_worker, t): i
+            for i, t in enumerate(tasks)
+        }
+        results: list[dict[str, Any] | None] = [None] * len(tasks)
+        for fut in as_completed(indexed_futures):
+            idx = indexed_futures[fut]
             try:
-                results.append(fut.result())
+                results[idx] = fut.result()
             except Exception as exc:
-                logger.error("Future failed: %s", exc)
-                results.append(None)
+                logger.error("Future %d failed: %s", idx, exc)
         return results
 
     def shutdown(self) -> None:
         if self._pool is not None:
-            self._pool.shutdown(wait=False)
+            self._pool.shutdown(wait=True, cancel_futures=True)
             self._pool = None

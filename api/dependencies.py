@@ -3,10 +3,48 @@ from __future__ import annotations
 import hmac
 import os
 import sqlite3
+import threading
 from dataclasses import dataclass, field
 from typing import Generator, Optional
 
 from fastapi import Header, HTTPException, Query, status
+
+
+def _make_pooled_conn(db_path: str) -> sqlite3.Connection:
+    conn = sqlite3.connect(db_path, check_same_thread=False, timeout=15)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA cache_size=-65536")
+    conn.execute("PRAGMA mmap_size=268435456")
+    conn.execute("PRAGMA temp_store=MEMORY")
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+class _ConnectionPool:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._analytics: sqlite3.Connection | None = None
+        self._raw: sqlite3.Connection | None = None
+
+    def get_analytics(self) -> sqlite3.Connection:
+        if self._analytics is None:
+            with self._lock:
+                if self._analytics is None:
+                    db_path = os.getenv("ANALYTICS_DB", "/data/analytics/analytics.db")
+                    self._analytics = _make_pooled_conn(db_path)
+        return self._analytics
+
+    def get_raw(self) -> sqlite3.Connection:
+        if self._raw is None:
+            with self._lock:
+                if self._raw is None:
+                    db_path = os.getenv("RAW_DB", "/data/logs/raw.db")
+                    self._raw = _make_pooled_conn(db_path)
+        return self._raw
+
+
+_pool = _ConnectionPool()
 
 
 @dataclass
@@ -85,23 +123,11 @@ def resolve_auth(
 
 
 def get_analytics_db() -> Generator[sqlite3.Connection, None, None]:
-    db_path = os.getenv("ANALYTICS_DB", "/data/analytics/analytics.db")
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    try:
-        yield conn
-    finally:
-        conn.close()
+    yield _pool.get_analytics()
 
 
 def get_raw_db() -> Generator[sqlite3.Connection, None, None]:
-    db_path = os.getenv("RAW_DB", "/data/logs/raw.db")
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    try:
-        yield conn
-    finally:
-        conn.close()
+    yield _pool.get_raw()
 
 
 def get_bodies_dir() -> str:

@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import gzip
 import hashlib
 import json
 import logging
+import os
+import queue
 import sqlite3
 import threading
+import time as time_mod
 import uuid
 import zlib
 from datetime import datetime, timezone
@@ -16,6 +20,122 @@ from typing import Any
 from .config import Config
 
 logger = logging.getLogger("llm-proxy.recorder")
+
+
+class _SyncWriter:
+    __slots__ = ("_db_path",)
+
+    def __init__(self, db_path: str):
+        self._db_path = db_path
+
+    def enqueue(self, sql: str, params: tuple) -> None:
+        conn = sqlite3.connect(self._db_path, timeout=10)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        try:
+            conn.execute(sql, params)
+            conn.commit()
+        finally:
+            conn.close()
+
+    def flush(self) -> None:
+        pass
+
+    def shutdown(self) -> None:
+        pass
+
+# ---------------------------------------------------------------------------
+# Batch SQLite writer – collects writes in a thread-safe queue and flushes
+# in bulk to avoid per-request commit() overhead.
+# ---------------------------------------------------------------------------
+
+class _WriteOp:
+    __slots__ = ("sql", "params")
+
+    def __init__(self, sql: str, params: tuple):
+        self.sql = sql
+        self.params = params
+
+
+class BatchSQLiteWriter:
+    """Thread-safe batch writer for SQLite.
+
+    Collects INSERT/UPDATE operations in a queue and flushes them
+    in batches of *batch_size* or every *flush_interval_secs* to a
+    single ``BEGIN IMMEDIATE`` transaction.
+    """
+
+    def __init__(
+        self,
+        db_path: str,
+        batch_size: int = 50,
+        flush_interval_secs: float = 0.5,
+    ):
+        self._db_path = db_path
+        self._batch_size = batch_size
+        self._flush_interval = flush_interval_secs
+        self._queue: queue.Queue[_WriteOp] = queue.Queue()
+        self._shutdown = threading.Event()
+        self._thread = threading.Thread(target=self._flush_loop, daemon=True)
+        self._thread.start()
+
+    def enqueue(self, sql: str, params: tuple) -> None:
+        self._queue.put(_WriteOp(sql, params))
+
+    def _flush_loop(self) -> None:
+        batch: list[_WriteOp] = []
+        while not self._shutdown.is_set():
+            try:
+                op = self._queue.get(timeout=self._flush_interval)
+                batch.append(op)
+                # Drain remaining without blocking
+                while len(batch) < self._batch_size:
+                    try:
+                        batch.append(self._queue.get_nowait())
+                    except queue.Empty:
+                        break
+                self._flush(batch)
+                batch.clear()
+            except queue.Empty:
+                if batch:
+                    self._flush(batch)
+                    batch.clear()
+
+    def _flush(self, ops: list[_WriteOp]) -> None:
+        conn = sqlite3.connect(str(self._db_path), timeout=10)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            for op in ops:
+                conn.execute(op.sql, op.params)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def shutdown(self, timeout: float = 5.0) -> None:
+        self._shutdown.set()
+        self._thread.join(timeout=timeout)
+        self._drain()
+
+    def flush(self, timeout: float = 5.0) -> None:
+        self._drain()
+        deadline = time_mod.monotonic() + timeout
+        while not self._queue.empty() and time_mod.monotonic() < deadline:
+            time_mod.sleep(0.01)
+
+    def _drain(self) -> None:
+        remainder: list[_WriteOp] = []
+        while True:
+            try:
+                remainder.append(self._queue.get_nowait())
+            except queue.Empty:
+                break
+        if remainder:
+            self._flush(remainder)
 
 
 class SeqGenerator:
@@ -56,6 +176,11 @@ class Recorder:
         self._init_db()
         self._seq = SeqGenerator.from_db(self._get_conn(), "raw_requests")
         self._ws_seq = SeqGenerator.from_db(self._get_conn(), "raw_ws_connections")
+        sync_mode = os.environ.get("RECORDER_SYNC", "").lower() in ("1", "true", "yes")
+        if sync_mode:
+            self._batch_writer: BatchSQLiteWriter | _SyncWriter = _SyncWriter(str(self.db_path))
+        else:
+            self._batch_writer = BatchSQLiteWriter(str(self.db_path), batch_size=50, flush_interval_secs=0.5)
 
     @property
     def jsonl_path(self) -> Path:
@@ -267,8 +392,7 @@ class Recorder:
 
         api_key_hash = self.extract_api_key_hash(headers)
         seq = self._seq.next()
-        conn = self._get_conn()
-        conn.execute(
+        self._batch_writer.enqueue(
             """INSERT INTO raw_requests (id, seq, timestamp, method, path, query_string,
                request_headers, request_body_ref, request_body_size,
                client_ip, client_port, upstream_url, api_key_hash)
@@ -289,7 +413,6 @@ class Recorder:
                 api_key_hash,
             ),
         )
-        conn.commit()
         logger.debug("Recorded request %s: %s %s", request_id, method, path)
 
     def record_response(
@@ -309,8 +432,7 @@ class Recorder:
             stored_body = self._decode_body_for_storage(body, headers)
             body_ref, body_size = self._write_jsonl(request_id, "response", stored_body)
 
-        conn = self._get_conn()
-        conn.execute(
+        self._batch_writer.enqueue(
             """UPDATE raw_requests SET
                status_code = ?, response_headers = ?, response_body_ref = ?,
                response_body_size = ?, is_stream = ?, duration_ms = ?, error = ?
@@ -326,18 +448,14 @@ class Recorder:
                 request_id,
             ),
         )
-        conn.commit()
         logger.debug("Recorded response %s: %d (%.1fms)", request_id, status_code, duration_ms)
 
     def record_stream_body(self, request_id: str, accumulated_body: str) -> None:
-        """Update the response body for a streamed response after completion."""
         body_ref, body_size = self._write_jsonl(request_id, "response", accumulated_body)
-        conn = self._get_conn()
-        conn.execute(
+        self._batch_writer.enqueue(
             "UPDATE raw_requests SET response_body_ref = ?, response_body_size = ? WHERE id = ?",
             (body_ref, body_size, request_id),
         )
-        conn.commit()
 
     # ------------------------------------------------------------------ #
     # WebSocket recording                                                  #
@@ -354,8 +472,7 @@ class Recorder:
         client_port: int | None = None,
     ) -> None:
         seq = self._ws_seq.next()
-        conn = self._get_conn()
-        conn.execute(
+        self._batch_writer.enqueue(
             """INSERT INTO raw_ws_connections
                (id, seq, timestamp, path, query_string, request_headers, subprotocol,
                 client_ip, client_port)
@@ -372,7 +489,6 @@ class Recorder:
                 client_port,
             ),
         )
-        conn.commit()
         logger.debug("WS connect recorded %s: %s", conn_id[:8], path)
 
     def record_ws_message(
@@ -396,23 +512,25 @@ class Recorder:
             if len(data) > max_size:
                 text += f"\n... [truncated at {max_size}]"
 
-        conn = self._get_conn()
-        conn.execute(
+        self._batch_writer.enqueue(
             """INSERT INTO raw_ws_messages (connection_id, direction, message_type, data, data_size, timestamp)
                VALUES (?, ?, ?, ?, ?, ?)""",
             (conn_id, direction, message_type, text, data_size, datetime.now(timezone.utc).isoformat()),
         )
-        conn.execute(
+        self._batch_writer.enqueue(
             "UPDATE raw_ws_connections SET message_count = message_count + 1 WHERE id = ?",
             (conn_id,),
         )
-        conn.commit()
 
     def record_ws_close(self, conn_id: str, duration_ms: float) -> None:
-        conn = self._get_conn()
-        conn.execute(
+        self._batch_writer.enqueue(
             """UPDATE raw_ws_connections SET closed_at = ?, duration_ms = ? WHERE id = ?""",
             (datetime.now(timezone.utc).isoformat(), duration_ms, conn_id),
         )
-        conn.commit()
         logger.debug("WS close recorded %s (%.1fms)", conn_id[:8], duration_ms)
+
+    def shutdown(self) -> None:
+        self._batch_writer.shutdown()
+
+    def flush(self) -> None:
+        self._batch_writer.flush()

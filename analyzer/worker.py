@@ -263,11 +263,36 @@ class AnalyzerWorker:
         self.analytics_store.upsert_prompt_templates_batch(template_list)
         self.analytics_store.set_watermark(seq, processed)
 
-        for date in dates_to_refresh:
+        daily_rows: list[tuple] = []
+        for conv in conv_list:
+            ts = conv.get("timestamp", "")
+            date = ts[:10] if ts else ""
+            if not date:
+                continue
+            model = conv.get("model") or "unknown"
+            provider = conv.get("provider") or "unknown"
+            is_success = 1 if conv.get("status") == "success" else 0
+            is_error = 1 if conv.get("status") != "success" else 0
+            daily_rows.append((
+                date, model, provider,
+                1, is_success, is_error,
+                conv.get("total_tokens") or 0,
+                conv.get("prompt_tokens") or 0,
+                conv.get("completion_tokens") or 0,
+                conv.get("cost_usd") or 0.0,
+                conv.get("duration_ms") or 0.0,
+            ))
+
+        if daily_rows:
             try:
-                self.analytics_store.refresh_daily_stats(date)
+                self.analytics_store.increment_daily_stats_batch(daily_rows)
             except Exception as e:
-                logger.warning("Failed to refresh daily stats for %s: %s", date, e)
+                logger.warning("Failed to increment daily stats: %s, falling back to refresh", e)
+                for date in dates_to_refresh:
+                    try:
+                        self.analytics_store.refresh_daily_stats(date)
+                    except Exception as e2:
+                        logger.warning("Failed to refresh daily stats for %s: %s", date, e2)
 
         return seq, processed
 

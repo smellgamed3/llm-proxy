@@ -73,4 +73,7 @@ def base_config(tmp_log_dir: Path) -> Config:
 
 @pytest.fixture
 def recorder(base_config: Config) -> Recorder:
-    return Recorder(base_config)
+    import os
+    os.environ["RECORDER_SYNC"] = "1"
+    yield Recorder(base_config)
+    os.environ.pop("RECORDER_SYNC", None)
