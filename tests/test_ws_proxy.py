@@ -186,6 +186,7 @@ class TestWSRecording:
         with client.websocket_connect("/ws") as ws:
             ws.receive_text()
 
+        rec.flush()
         rows = db_rows(rec, "raw_ws_connections")
         assert rows[0]["duration_ms"] is not None
         assert rows[0]["duration_ms"] >= 0

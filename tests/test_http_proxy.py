@@ -400,6 +400,7 @@ class TestHTTPRecording:
         client, _, rec = make_proxy_with_upstream(tmp_path, upstream)
 
         client.post("/v1/chat", json={"model": "m"})
+        rec.flush()
         rows = db_rows(rec, "raw_requests")
         assert rows[0]["status_code"] == 200
         assert rows[0]["duration_ms"] > 0
