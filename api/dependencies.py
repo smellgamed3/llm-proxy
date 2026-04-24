@@ -7,7 +7,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Generator, Optional
 
-from fastapi import Header, HTTPException, Query, status
+from fastapi import Depends, Header, HTTPException, Query, status
 
 
 def _make_pooled_conn(db_path: str) -> sqlite3.Connection:
@@ -132,3 +132,16 @@ def get_raw_db() -> Generator[sqlite3.Connection, None, None]:
 
 def get_bodies_dir() -> str:
     return os.getenv("BODIES_DIR", "/data/logs/bodies")
+
+
+# 模块级 BodyReader 缓存（按路径区分，避免测试环境的路径冲突）
+_body_readers: dict[str, BodyReader] = {}
+_body_reader_lock = threading.Lock()
+
+def get_body_reader(bodies_dir: str = Depends(get_bodies_dir)) -> BodyReader:
+    from analyzer.body_reader import BodyReader
+    if bodies_dir not in _body_readers:
+        with _body_reader_lock:
+            if bodies_dir not in _body_readers:
+                _body_readers[bodies_dir] = BodyReader(bodies_dir)
+    return _body_readers[bodies_dir]

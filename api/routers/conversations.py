@@ -11,7 +11,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from analyzer.body_reader import BodyReader
-from api.dependencies import get_analytics_db, get_raw_db, get_bodies_dir, resolve_auth, AuthContext
+from api.dependencies import get_analytics_db, get_raw_db, get_body_reader, resolve_auth, AuthContext
 from api.query import SqlWhereBuilder, pagination_offset, validate_order, validate_sort
 
 router = APIRouter(tags=["conversations"])
@@ -46,13 +46,8 @@ def _conversation_filters(
     builder.add("path LIKE ?", f"{path_prefix}%", enabled=bool(path_prefix))
     builder.add("request_type = ?", request_type, enabled=bool(request_type))
     if q:
-        like_q = f"%{q}%"
-        builder.add(
-            "(user_prompt LIKE ? OR system_prompt LIKE ? OR assistant_response LIKE ?)",
-            like_q,
-            like_q,
-            like_q,
-        )
+        # 使用 rowid 通过 FTS5 索引查找，替代 LIKE 全表扫描
+        builder.add("rowid IN (SELECT rowid FROM conversations_fts WHERE conversations_fts MATCH ?)", q)
     return builder
 
 
@@ -81,13 +76,17 @@ def list_conversations(
     template_id: str | None = None,
     path_prefix: str | None = None,
     request_type: str | None = None,
+    after_seq: int | None = None,
     sort: str = "timestamp",
     order: str = "desc",
     db: sqlite3.Connection = Depends(get_analytics_db),
     auth: AuthContext = Depends(resolve_auth),
 ) -> dict:
-    """List conversations with filtering and pagination."""
-    sort = validate_sort(sort, allowed={"timestamp", "duration_ms", "cost_usd", "total_tokens"}, default="timestamp")
+    """List conversations with filtering and cursor-based pagination.
+
+    当 after_seq 不为空时使用游标分页（比 OFFSET 更高效），否则使用传统分页。
+    """
+    sort = validate_sort(sort, allowed={"timestamp", "duration_ms", "cost_usd", "total_tokens", "seq"}, default="timestamp")
     order_dir = validate_order(order)
     filters = _conversation_filters(
         auth,
@@ -101,12 +100,20 @@ def list_conversations(
         request_type=request_type,
     )
 
+    # COUNT(*)：始终从 conversations 表精确计数
     count_row = db.execute(
         f"SELECT COUNT(*) FROM conversations {filters.where_sql}", filters.params
     ).fetchone()
     total = count_row[0]
 
-    offset = pagination_offset(page, page_size)
+    # 游标分页（优先）或 OFFSET 分页
+    cursor_clause = ""
+    cursor_params: list[Any] = []
+    if after_seq is not None:
+        comparator = "<" if order_dir == "DESC" else ">"
+        cursor_clause = f"AND seq {comparator} ? "
+        cursor_params = [after_seq]
+
     rows = db.execute(
         f"""SELECT id, seq, timestamp, path, method, provider, model, request_type,
                    status, error_type, status_code, is_stream, duration_ms,
@@ -115,16 +122,20 @@ def list_conversations(
                    substr(coalesce(user_prompt, ''), 1, 160) AS user_prompt_preview,
                    substr(coalesce(assistant_response, ''), 1, 160) AS assistant_response_preview
             FROM conversations {filters.where_sql}
+            {cursor_clause}
             ORDER BY {sort} {order_dir}
-            LIMIT ? OFFSET ?""",
-        filters.params + [page_size, offset],
+            LIMIT ?{'' if cursor_clause else ' OFFSET ?'}""",
+        filters.params + cursor_params + [page_size] + ([] if cursor_clause else [pagination_offset(page, page_size)]),
     ).fetchall()
+
+    items = [dict(r) for r in rows]
 
     return {
         "total": total,
         "page": page,
         "page_size": page_size,
-        "items": [dict(r) for r in rows],
+        "items": items,
+        "last_seq": items[-1]["seq"] if items else None,
     }
 
 
@@ -136,6 +147,7 @@ def export_conversations(
     date_from: str | None = None,
     date_to: str | None = None,
     template_id: str | None = None,
+    q: str | None = None,
     limit: int = 10000,
     db: sqlite3.Connection = Depends(get_analytics_db),
     auth: AuthContext = Depends(resolve_auth),
@@ -151,6 +163,7 @@ def export_conversations(
         date_from=date_from,
         date_to=date_to,
         template_id=template_id,
+        q=q,
     )
     safe_limit = min(limit, 50000)
 
@@ -212,7 +225,7 @@ def get_conversation(
 def get_raw_conversation(
     conv_id: str,
     raw_db: sqlite3.Connection = Depends(get_raw_db),
-    bodies_dir: str = Depends(get_bodies_dir),
+    body_reader: BodyReader = Depends(get_body_reader),
     db: sqlite3.Connection = Depends(get_analytics_db),
     auth: AuthContext = Depends(resolve_auth),
 ) -> dict:
@@ -227,7 +240,6 @@ def get_raw_conversation(
     if row is None:
         raise HTTPException(status_code=404, detail="Raw record not found")
     data = dict(row)
-    body_reader = BodyReader(bodies_dir)
     if data.get("request_body_ref"):
         data["request_body"] = body_reader.read(data["request_body_ref"])
     if data.get("response_body_ref"):
@@ -290,4 +302,3 @@ def set_tags(
     )
     db.commit()
     return {"id": conv_id, "tags": body.tags}
-

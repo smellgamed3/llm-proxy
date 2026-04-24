@@ -37,6 +37,7 @@ class AnalyticsStore:
 
     def _init_db(self) -> None:
         with self._get_conn() as conn:
+            conn.execute("PRAGMA journal_mode=WAL")  # FTS5 需要 WAL 模式
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS conversations (
                     id                  TEXT PRIMARY KEY,
@@ -82,6 +83,36 @@ class AnalyticsStore:
                 CREATE INDEX IF NOT EXISTS idx_conv_status ON conversations(status);
                 CREATE INDEX IF NOT EXISTS idx_conv_template ON conversations(template_id);
                 CREATE INDEX IF NOT EXISTS idx_conv_seq ON conversations(seq);
+                CREATE INDEX IF NOT EXISTS idx_conv_duration ON conversations(duration_ms);
+                CREATE INDEX IF NOT EXISTS idx_conv_tokens ON conversations(total_tokens);
+                CREATE INDEX IF NOT EXISTS idx_conv_cost ON conversations(cost_usd);
+
+                -- FTS5 全文搜索（user_prompt, system_prompt, assistant_response）
+                CREATE VIRTUAL TABLE IF NOT EXISTS conversations_fts USING fts5(
+                    user_prompt, system_prompt, assistant_response,
+                    content='conversations', content_rowid='rowid'
+                );
+
+                -- 触发器：conversations 写入时自动更新 FTS 索引
+                CREATE TRIGGER IF NOT EXISTS conv_fts_insert AFTER INSERT ON conversations
+                BEGIN
+                    INSERT INTO conversations_fts(rowid, user_prompt, system_prompt, assistant_response)
+                    VALUES (new.rowid, new.user_prompt, new.system_prompt, new.assistant_response);
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS conv_fts_delete AFTER DELETE ON conversations
+                BEGIN
+                    INSERT INTO conversations_fts(conversations_fts, rowid, user_prompt, system_prompt, assistant_response)
+                    VALUES ('delete', old.rowid, old.user_prompt, old.system_prompt, old.assistant_response);
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS conv_fts_update AFTER UPDATE ON conversations
+                BEGIN
+                    INSERT INTO conversations_fts(conversations_fts, rowid, user_prompt, system_prompt, assistant_response)
+                    VALUES ('delete', old.rowid, old.user_prompt, old.system_prompt, old.assistant_response);
+                    INSERT INTO conversations_fts(rowid, user_prompt, system_prompt, assistant_response)
+                    VALUES (new.rowid, new.user_prompt, new.system_prompt, new.assistant_response);
+                END;
 
                 CREATE TABLE IF NOT EXISTS prompt_templates (
                     template_id         TEXT PRIMARY KEY,
@@ -142,7 +173,17 @@ class AnalyticsStore:
             self._migrate(conn)
 
     def _migrate(self, conn: sqlite3.Connection) -> None:
-        """Add columns introduced in later versions (idempotent)."""
+        """Add columns and rebuild FTS index for existing data (idempotent)."""
+        # 为已有数据填充 FTS 索引（仅当索引为空时）
+        try:
+            fts_count = conn.execute("SELECT COUNT(*) FROM conversations_fts").fetchone()[0]
+            if fts_count == 0:
+                conn.execute("""
+                    INSERT INTO conversations_fts(rowid, user_prompt, system_prompt, assistant_response)
+                    SELECT rowid, user_prompt, system_prompt, assistant_response FROM conversations
+                """)
+        except Exception:
+            pass  # FTS 表可能不存在
         existing = {
             row[1]
             for row in conn.execute("PRAGMA table_info(conversations)").fetchall()

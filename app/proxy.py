@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import socket
 import time
 from urllib.parse import urlsplit, urlunsplit
@@ -344,22 +345,38 @@ class ProxyHandler:
         """处理 SSE 流式响应：转发 chunk，同时收集完整文本用于记录。"""
         # 使用列表收集 chunk 文本，仅在结束时拼接一次（避免 n² 拷贝）
         accumulated_parts: list[str] = []
+        # 内存上限保护：防止超长流（如几小时的推理）耗尽内存
+        # 默认 50 MB，可通过 MAX_STREAM_BODY_BYTES 环境变量配置
+        _max_bytes = int(os.environ.get("MAX_STREAM_BODY_BYTES", 50 * 1024 * 1024))
+        _total_bytes = 0
+        _truncated = False
 
         async def generate():
-            nonlocal accumulated_parts
+            nonlocal accumulated_parts, _total_bytes, _truncated
             try:
                 async for chunk, chunk_text in stream_and_record(upstream_resp.aiter_raw()):
-                    accumulated_parts.append(chunk_text)
+                    if not _truncated:
+                        _total_bytes += len(chunk)
+                        if _total_bytes > _max_bytes:
+                            _truncated = True
+                            logger.warning(
+                                "%s stream body exceeds %d bytes, truncating recording",
+                                request_id[:8], _max_bytes,
+                            )
+                        else:
+                            accumulated_parts.append(chunk_text)
                     yield chunk
             except Exception as e:
                 logger.error("Stream error for %s: %s", request_id[:8], e)
                 if should_record:
-                    full_body = "".join(accumulated_parts)
+                    body = "".join(accumulated_parts)
+                    if _truncated:
+                        body += f"\n... [recording truncated at {_max_bytes} bytes]"
                     self.recorder.record_response(
                         request_id=request_id,
                         status_code=upstream_resp.status_code,
                         headers=_response_headers_for_recording(resp_headers),
-                        body=full_body,
+                        body=body,
                         is_stream=True,
                         duration_ms=(time.monotonic() - start) * 1000,
                         error=str(e),
@@ -369,19 +386,22 @@ class ProxyHandler:
                 await upstream_resp.aclose()
                 duration_ms = (time.monotonic() - start) * 1000
                 if should_record:
-                    full_body = "".join(accumulated_parts)
+                    body = "".join(accumulated_parts)
+                    if _truncated:
+                        body += f"\n... [recording truncated at {_max_bytes} bytes]"
                     self.recorder.record_response(
                         request_id=request_id,
                         status_code=upstream_resp.status_code,
                         headers=_response_headers_for_recording(resp_headers),
-                        body=full_body,
+                        body=body,
                         is_stream=True,
                         duration_ms=duration_ms,
                     )
                 logger.info(
-                    "%s %d %.1fms (streamed, %d bytes)",
+                    "%s %d %.1fms (streamed, %d bytes%s)",
                     request_id[:8], upstream_resp.status_code,
-                    duration_ms, len(full_body),
+                    duration_ms, _total_bytes,
+                    ", truncated" if _truncated else "",
                 )
 
         response = StreamingResponse(

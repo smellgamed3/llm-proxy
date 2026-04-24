@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -11,6 +12,7 @@ from starlette.websockets import WebSocket
 from .config import Config, load_config
 from common.logging import configure_logging
 from .recorder import Recorder
+from .recorder_client import DEFAULT_SOCKET, RecorderClient
 from .proxy import ProxyHandler
 from .ws import WSProxyHandler
 
@@ -31,7 +33,10 @@ def create_app(config: Config | None = None) -> Starlette:
     if cfg.recording_filter.exclude:
         logger.info("  Exclude:     %s", [r.pattern for r in cfg.recording_filter.exclude])
 
-    recorder = Recorder(cfg)
+    socket_path = os.environ.get("RECORDER_SOCKET", DEFAULT_SOCKET)
+    recorder_client = RecorderClient(socket_path=socket_path)
+
+    recorder = Recorder(cfg, recorder_client)
     http_proxy = ProxyHandler(cfg, recorder)
     ws_proxy = WSProxyHandler(cfg, recorder)
 
@@ -45,11 +50,12 @@ def create_app(config: Config | None = None) -> Starlette:
         await ws_proxy.handle(websocket)
 
     async def on_startup():
+        await recorder_client.start()
         logger.info("LLM Proxy ready (HTTP + WebSocket)")
 
     async def on_shutdown():
         logger.info("Shutting down LLM Proxy")
-        recorder.shutdown()
+        await recorder_client.stop()
         await http_proxy.close()
 
     HTTP_METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"]
@@ -70,4 +76,3 @@ def create_app(config: Config | None = None) -> Starlette:
         on_shutdown=[on_shutdown],
     )
     return app
-
