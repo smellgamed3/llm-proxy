@@ -526,7 +526,7 @@ if __name__ == "__main__":
     parser.add_argument("--socket", default=os.environ.get("RECORDER_SOCKET", DEFAULT_SOCKET_PATH))
     args = parser.parse_args()
 
-    configure_logging()
+    configure_logging(service_name="recorder")
     RecorderServer.run(
         log_dir=args.log_dir,
         max_body_log_size=args.max_body_log_size,

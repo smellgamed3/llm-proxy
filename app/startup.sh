@@ -46,4 +46,4 @@ exec uvicorn app.main:create_app --factory \
     --host "${LISTEN_HOST:-0.0.0.0}" \
     --port "${LISTEN_PORT:-9090}" \
     --workers "${UVICORN_WORKERS:-4}" \
-    --log-level "${LOG_LEVEL:-info}"
+    --log-level "$(echo "${LOG_LEVEL:-info}" | tr '[:upper:]' '[:lower:]')"
