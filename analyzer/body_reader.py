@@ -13,6 +13,9 @@ class BodyReader:
 
     def __init__(self, bodies_dir: str):
         self.bodies_dir = Path(bodies_dir)
+        self._manifest_cache: dict[str, tuple[str, int, int]] | None = None
+        """Cached manifest: ``{ref: (shard_filename, offset, length)}``.
+        Built on first access and reused across all subsequent batch/single reads."""
 
     def read(self, ref: str) -> str | None:
         """Read body content by ref. Uses manifest first, falls back to scanning all JSONL files."""
@@ -54,29 +57,70 @@ class BodyReader:
         return results
 
     # ------------------------------------------------------------------
-    # Single-ref helpers (original)
+    # Manifest cache management
     # ------------------------------------------------------------------
 
-    def _read_via_manifest(self, ref: str, manifest_path: Path) -> str | None:
-        """Look up ref in manifest and read at specified offset."""
+    def _ensure_manifest_cache(self) -> dict[str, tuple[str, int, int]]:
+        """Build and cache the manifest index on first call.
+
+        Parses manifest.jsonl once and stores ``{ref: (shard_filename, offset, length)}``
+        in memory.  Subsequent lookups are O(1) dict lookups — no more
+        full-scanning the 11 MB / 96K-line manifest every batch.
+        """
+        if self._manifest_cache is not None:
+            return self._manifest_cache
+
+        cache: dict[str, tuple[str, int, int]] = {}
+        manifest_path = self.bodies_dir / "manifest.jsonl"
+        if not manifest_path.exists():
+            self._manifest_cache = cache
+            return cache
+
         try:
             for line in manifest_path.read_text(encoding="utf-8").splitlines():
                 if not line.strip():
                     continue
                 entry = orjson.loads(line)
-                if entry.get("ref") != ref:
-                    continue
-                shard_file = self.bodies_dir / entry["file"]
-                if not shard_file.exists():
-                    continue
-                with open(shard_file, "rb") as f:
-                    f.seek(entry["offset"])
-                    raw = f.read(entry["length"])
-                record = orjson.loads(raw)
-                return record.get("data")
+                ref = entry.get("ref")
+                cache[ref] = (entry["file"], entry["offset"], entry["length"])
+        except Exception as e:
+            logger.debug("Failed to build manifest cache: %s", e)
+
+        self._manifest_cache = cache
+        logger.info("Built manifest cache: %d entries", len(cache))
+        return cache
+
+    def invalidate_manifest_cache(self) -> None:
+        """Clear the cached manifest so the next read rebuilds it from disk.
+
+        Call this when new bodies are written (e.g. after a checkpoint) and
+        the manifest has grown.
+        """
+        self._manifest_cache = None
+
+    # ------------------------------------------------------------------
+    # Single-ref helpers (original)
+    # ------------------------------------------------------------------
+
+    def _read_via_manifest(self, ref: str, manifest_path: Path) -> str | None:
+        """Look up ref in cached manifest and read at specified offset."""
+        cache = self._ensure_manifest_cache()
+        entry = cache.get(ref)
+        if entry is None:
+            return None
+        fname, offset, length = entry
+        shard_file = self.bodies_dir / fname
+        if not shard_file.exists():
+            return None
+        try:
+            with open(shard_file, "rb") as f:
+                f.seek(offset)
+                raw = f.read(length)
+            record = orjson.loads(raw)
+            return record.get("data")
         except Exception as e:
             logger.debug("Manifest read failed for ref %s: %s", ref, e)
-        return None
+            return None
 
     def _scan_all(self, ref: str) -> str | None:
         """Scan all JSONL shard files for the given ref."""
@@ -104,32 +148,28 @@ class BodyReader:
         results: dict[str, str | None],
         manifest_path: Path,
     ) -> None:
-        """Look up multiple refs via manifest, grouped by shard file."""
-        try:
-            file_entries: dict[str, list[tuple[str, int, int]]] = {}
-            for line in manifest_path.read_text(encoding="utf-8").splitlines():
-                if not line.strip():
-                    continue
-                entry = orjson.loads(line)
-                ref = entry.get("ref")
-                if ref in ref_set:
-                    fname = entry["file"]
-                    file_entries.setdefault(fname, []).append(
-                        (ref, entry["offset"], entry["length"])
-                    )
+        """Look up multiple refs via cached manifest, grouped by shard file."""
+        cache = self._ensure_manifest_cache()
+        file_entries: dict[str, list[tuple[str, int, int]]] = {}
+        for ref in ref_set:
+            entry = cache.get(ref)
+            if entry is not None:
+                fname, offset, length = entry
+                file_entries.setdefault(fname, []).append((ref, offset, length))
 
-            for fname, entries in file_entries.items():
-                shard_file = self.bodies_dir / fname
-                if not shard_file.exists():
-                    continue
+        for fname, entries in file_entries.items():
+            shard_file = self.bodies_dir / fname
+            if not shard_file.exists():
+                continue
+            try:
                 with open(shard_file, "rb") as f:
                     for ref, offset, length in entries:
                         f.seek(offset)
                         raw = f.read(length)
                         record = orjson.loads(raw)
                         results[ref] = record.get("data")
-        except Exception as e:
-            logger.debug("Batch manifest read failed: %s", e)
+            except Exception as e:
+                logger.debug("Batch manifest read failed for %s: %s", fname, e)
 
     def _scan_all_batch(
         self,

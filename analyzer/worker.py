@@ -265,10 +265,7 @@ class AnalyzerWorker:
             if result["date"]:
                 dates_to_refresh.add(result["date"])
 
-        self.analytics_store.upsert_conversations_batch(conv_list)
-        self.analytics_store.upsert_prompt_templates_batch(template_list)
-        self.analytics_store.set_watermark(seq, processed)
-
+        # 构建 daily_stats 行
         daily_rows: list[tuple] = []
         for conv in conv_list:
             ts = conv.get("timestamp", "")
@@ -289,16 +286,19 @@ class AnalyzerWorker:
                 conv.get("duration_ms") or 0.0,
             ))
 
-        if daily_rows:
-            try:
-                self.analytics_store.increment_daily_stats_batch(daily_rows)
-            except Exception as e:
-                logger.warning("Failed to increment daily stats: %s, falling back to refresh", e)
-                for date in dates_to_refresh:
-                    try:
-                        self.analytics_store.refresh_daily_stats(date)
-                    except Exception as e2:
-                        logger.warning("Failed to refresh daily stats for %s: %s", date, e2)
+        # 使用组合事务：upsert + daily_stats + watermark 在同一事务中原子完成
+        # 崩溃恢复时不会出现数据与 watermark 不一致的情况
+        try:
+            self.analytics_store.commit_batch_with_watermark(
+                conv_list, template_list, daily_rows, seq, processed,
+            )
+        except Exception as e:
+            logger.error("Failed to commit batch at seq %d: %s, falling back to refresh", seq, e)
+            for date in dates_to_refresh:
+                try:
+                    self.analytics_store.refresh_daily_stats(date)
+                except Exception as e2:
+                    logger.warning("Failed to refresh daily stats for %s: %s", date, e2)
 
         return seq, processed
 

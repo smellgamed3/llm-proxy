@@ -8,4 +8,4 @@ COPY api/ ./api/
 COPY analyzer/ ./analyzer/
 ENV PATH="/app/.venv/bin:$PATH" ANALYTICS_DB=/data/analytics/analytics.db RAW_DB=/data/logs/raw.db BODIES_DIR=/data/logs/bodies
 EXPOSE 9091
-CMD ["uvicorn", "api.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "9091"]
+CMD ["sh", "-c", "exec uvicorn api.app:create_app --factory --host 0.0.0.0 --port 9091 --workers ${API_WORKERS:-2}"]

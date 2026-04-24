@@ -234,18 +234,32 @@ class ParallelProcessor:
         self,
         tasks: list[tuple[dict, str | None, str | None]],
     ) -> list[dict[str, Any] | None]:
+        """提交任务到进程池处理，使用分块提交控制内存。
+
+        将任务分成多个 chunk 依次提交，每轮最多有 ``pool_size * 2`` 个
+        Future 同时在内存中，避免大批量（5000）时一次性创建所有 Future
+        导致内存压力。
+        """
         pool = self._ensure_pool()
-        indexed_futures = {
-            pool.submit(_process_record_in_worker, t): i
-            for i, t in enumerate(tasks)
-        }
+        # 每轮最多提交 pool_size * 2 个任务，平衡吞吐和内存
+        chunk_size = self.num_workers * 2
         results: list[dict[str, Any] | None] = [None] * len(tasks)
-        for fut in as_completed(indexed_futures):
-            idx = indexed_futures[fut]
-            try:
-                results[idx] = fut.result()
-            except Exception as exc:
-                logger.error("Future %d failed: %s", idx, exc)
+
+        for start in range(0, len(tasks), chunk_size):
+            chunk = tasks[start:start + chunk_size]
+            indexed: dict = {}
+            for i, t in enumerate(chunk):
+                actual_idx = start + i
+                fut = pool.submit(_process_record_in_worker, t)
+                indexed[fut] = actual_idx
+
+            for fut in as_completed(indexed):
+                idx = indexed[fut]
+                try:
+                    results[idx] = fut.result()
+                except Exception as exc:
+                    logger.error("Future %d failed: %s", idx, exc)
+
         return results
 
     def shutdown(self) -> None:

@@ -341,23 +341,25 @@ class ProxyHandler:
         start: float,
         should_record: bool,
     ) -> StreamingResponse:
-        """Handle SSE streaming response: forward chunks while accumulating for recording."""
-        accumulated_text = ""
+        """处理 SSE 流式响应：转发 chunk，同时收集完整文本用于记录。"""
+        # 使用列表收集 chunk 文本，仅在结束时拼接一次（避免 n² 拷贝）
+        accumulated_parts: list[str] = []
 
         async def generate():
-            nonlocal accumulated_text
+            nonlocal accumulated_parts
             try:
-                async for chunk, acc in stream_and_record(upstream_resp.aiter_raw()):
-                    accumulated_text = acc
+                async for chunk, chunk_text in stream_and_record(upstream_resp.aiter_raw()):
+                    accumulated_parts.append(chunk_text)
                     yield chunk
             except Exception as e:
                 logger.error("Stream error for %s: %s", request_id[:8], e)
                 if should_record:
+                    full_body = "".join(accumulated_parts)
                     self.recorder.record_response(
                         request_id=request_id,
                         status_code=upstream_resp.status_code,
                         headers=_response_headers_for_recording(resp_headers),
-                        body=accumulated_text,
+                        body=full_body,
                         is_stream=True,
                         duration_ms=(time.monotonic() - start) * 1000,
                         error=str(e),
@@ -367,18 +369,19 @@ class ProxyHandler:
                 await upstream_resp.aclose()
                 duration_ms = (time.monotonic() - start) * 1000
                 if should_record:
+                    full_body = "".join(accumulated_parts)
                     self.recorder.record_response(
                         request_id=request_id,
                         status_code=upstream_resp.status_code,
                         headers=_response_headers_for_recording(resp_headers),
-                        body=accumulated_text,
+                        body=full_body,
                         is_stream=True,
                         duration_ms=duration_ms,
                     )
                 logger.info(
                     "%s %d %.1fms (streamed, %d bytes)",
                     request_id[:8], upstream_resp.status_code,
-                    duration_ms, len(accumulated_text),
+                    duration_ms, len(full_body),
                 )
 
         response = StreamingResponse(

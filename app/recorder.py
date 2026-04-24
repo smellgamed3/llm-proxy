@@ -70,11 +70,14 @@ class BatchSQLiteWriter:
         db_path: str,
         batch_size: int = 50,
         flush_interval_secs: float = 0.5,
+        max_queue_size: int = 10000,
     ):
         self._db_path = db_path
         self._batch_size = batch_size
         self._flush_interval = flush_interval_secs
-        self._queue: queue.Queue[_WriteOp] = queue.Queue()
+        # 有界队列：满时 put() 会阻塞等待，防止海量请求下无限增长导致 OOM
+        self._queue: queue.Queue[_WriteOp] = queue.Queue(maxsize=max_queue_size)
+        self._queue_drops = 0  # 队列满时丢弃的计数（当前采用阻塞策略，此字段预留）
         self._shutdown = threading.Event()
         self._thread = threading.Thread(target=self._flush_loop, daemon=True)
         self._thread.start()
@@ -172,7 +175,10 @@ class Recorder:
         self.bodies_dir = self.log_dir / "bodies"
 
         self._local = threading.local()
-        self._jsonl_lock = threading.Lock()
+        # 按文件路径分片锁：不同小时的 JSONL 文件使用独立锁，
+        # 减少高并发下的锁竞争。最后一个同步全局锁用于锁字典本身。
+        self._jsonl_locks: dict[str, threading.Lock] = {}
+        self._jsonl_locks_guard = threading.Lock()
         self._init_db()
         self._seq = SeqGenerator.from_db(self._get_conn(), "raw_requests")
         self._ws_seq = SeqGenerator.from_db(self._get_conn(), "raw_ws_connections")
@@ -299,7 +305,11 @@ class Recorder:
         return self.bodies_dir / fname
 
     def _write_jsonl(self, record_id: str, direction: str, data: Any) -> tuple[str, int]:
-        """Write a body to the hourly JSONL shard. Returns (ref, data_size)."""
+        """将 body 写入按小时的 JSONL 分片。返回 (ref, data_size)。
+
+        使用按文件分片的锁机制：不同小时的 JSONL 文件使用独立锁，
+        同一小时的写入互斥但不会阻塞其他小时的写入。
+        """
         ref = f"{record_id}:{direction}"
         body_str = data if isinstance(data, str) else ""
         original_size = 0
@@ -312,7 +322,7 @@ class Recorder:
         elif isinstance(data, str):
             original_size = len(data.encode("utf-8"))
 
-        # Truncate if too large
+        # 截断超过大小限制的 body
         if len(body_str) > self.config.max_body_log_size:
             body_str = body_str[:self.config.max_body_log_size] + f"\n... [truncated at {self.config.max_body_log_size} bytes]"
 
@@ -324,16 +334,20 @@ class Recorder:
         line_bytes = (line + "\n").encode("utf-8")
 
         jsonl_path = self._current_jsonl_path()
+        manifest_path = self.bodies_dir / "manifest.jsonl"
 
-        with self._jsonl_lock:
+        # 获取该文件路径对应的锁
+        file_key = str(jsonl_path)
+        with self._jsonl_locks_guard:
+            lock = self._jsonl_locks.setdefault(file_key, threading.Lock())
+
+        with lock:
             offset = jsonl_path.stat().st_size if jsonl_path.exists() else 0
             with open(jsonl_path, "ab") as f:
                 f.write(line_bytes)
-                # No fsync: OS page-cache buffering is sufficient for analytics
-                # logs. Forcing fsync here caused 2+ GB/s I/O spikes.
+                # 不调用 fsync：OS 页缓存缓冲对分析日志已足够。
 
-            # Update manifest
-            manifest_path = self.bodies_dir / "manifest.jsonl"
+            # 更新 manifest
             manifest_entry = json.dumps({
                 "ref": ref,
                 "file": jsonl_path.name,
@@ -342,7 +356,6 @@ class Recorder:
             }, ensure_ascii=False)
             with open(manifest_path, "a", encoding="utf-8") as mf:
                 mf.write(manifest_entry + "\n")
-                # No fsync: manifest is rebuilt from JSONL on crash recovery.
 
         return ref, original_size
 

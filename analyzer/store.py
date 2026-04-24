@@ -201,6 +201,106 @@ class AnalyticsStore:
                 (seq, records_processed),
             )
 
+    def commit_batch_with_watermark(
+        self,
+        conv_list: list[dict],
+        template_list: list[tuple[str, str, str | None, float | None]],
+        daily_rows: list[tuple],
+        watermark_seq: int,
+        records_processed: int,
+    ) -> None:
+        """在一次数据库事务中完成批量 upsert + watermark 更新。
+
+        确保 watermark 和实际数据写入原子化：崩溃恢复时不会因
+        watermark 已推进但数据未写入而丢失记录，也不会因数据已写入
+        但 watermark 未推进而重复处理。
+        """
+        conn = self._get_conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            # 批量 upsert conversations
+            if conv_list:
+                cols = list(conv_list[0].keys())
+                placeholders = ", ".join("?" for _ in cols)
+                col_names = ", ".join(cols)
+                updates = ", ".join(f"{c} = excluded.{c}" for c in cols if c != "id")
+                sql_conv = (
+                    f"INSERT INTO conversations ({col_names}) VALUES ({placeholders})"
+                    f" ON CONFLICT(id) DO UPDATE SET {updates}"
+                )
+                conn.executemany(sql_conv, [list(d.values()) for d in conv_list])
+
+            # 批量 upsert prompt_templates
+            if template_list:
+                agg: dict[str, dict] = {}
+                for template_id, system_prompt, timestamp, cost in template_list:
+                    cost = cost or 0.0
+                    if template_id in agg:
+                        entry = agg[template_id]
+                        entry["count"] += 1
+                        entry["total_cost"] += cost
+                        if timestamp:
+                            if not entry["last_ts"] or timestamp > entry["last_ts"]:
+                                entry["last_ts"] = timestamp
+                            if not entry["first_ts"] or timestamp < entry["first_ts"]:
+                                entry["first_ts"] = timestamp
+                    else:
+                        agg[template_id] = {
+                            "system_prompt": system_prompt,
+                            "first_ts": timestamp,
+                            "last_ts": timestamp,
+                            "count": 1,
+                            "total_cost": cost,
+                        }
+
+                sql_tpl = """INSERT INTO prompt_templates
+                               (template_id, system_prompt, first_seen, last_seen,
+                                use_count, total_cost_usd, avg_cost_usd)
+                             VALUES (?, ?, ?, ?, ?, ?, ?)
+                             ON CONFLICT(template_id) DO UPDATE SET
+                               last_seen = MAX(excluded.last_seen, prompt_templates.last_seen),
+                               use_count = prompt_templates.use_count + excluded.use_count,
+                               total_cost_usd = prompt_templates.total_cost_usd + excluded.total_cost_usd,
+                               avg_cost_usd = (prompt_templates.total_cost_usd + excluded.total_cost_usd)
+                                              / (prompt_templates.use_count + excluded.use_count)"""
+                tpl_rows = []
+                for tid, entry in agg.items():
+                    avg = entry["total_cost"] / entry["count"] if entry["count"] else 0.0
+                    tpl_rows.append((
+                        tid, entry["system_prompt"], entry["first_ts"],
+                        entry["last_ts"], entry["count"], entry["total_cost"], avg,
+                    ))
+                conn.executemany(sql_tpl, tpl_rows)
+
+            # 批量 upsert daily_stats
+            if daily_rows:
+                sql_daily = """INSERT INTO daily_stats
+                               (date, model, provider, request_count, success_count, error_count,
+                                total_tokens, prompt_tokens, completion_tokens, total_cost_usd, avg_duration_ms)
+                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             ON CONFLICT(date, model, provider) DO UPDATE SET
+                               request_count = request_count + excluded.request_count,
+                               success_count = success_count + excluded.success_count,
+                               error_count = error_count + excluded.error_count,
+                               total_tokens = total_tokens + excluded.total_tokens,
+                               prompt_tokens = prompt_tokens + excluded.prompt_tokens,
+                               completion_tokens = completion_tokens + excluded.completion_tokens,
+                               total_cost_usd = total_cost_usd + excluded.total_cost_usd,
+                               avg_duration_ms = (avg_duration_ms * request_count + excluded.avg_duration_ms * excluded.request_count)
+                                                 / (request_count + excluded.request_count)"""
+                conn.executemany(sql_daily, daily_rows)
+
+            # watermark 在同一事务中更新
+            conn.execute(
+                """UPDATE watermark SET seq = ?, processed = processed + ?,
+                   updated_at = datetime('now') WHERE id = 1""",
+                (watermark_seq, records_processed),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
     def upsert_conversation(self, data: dict) -> None:
         cols = list(data.keys())
         placeholders = ", ".join("?" for _ in cols)
