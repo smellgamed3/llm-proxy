@@ -120,6 +120,7 @@ class AnalyzerWorker:
         processed_total = 0
         until = self.config.until if self.config.mode == "range" else None
         workload = self._describe_workload(start_seq, until=until)
+        batch_size = self.config.batch_size or self.config.min_batch_size
         self._emit_progress(
             processed_rows=0,
             total_rows=workload["total_rows"],
@@ -137,7 +138,7 @@ class AnalyzerWorker:
                     "target_seq": workload["target_seq"],
                     "stopped": True,
                 }
-            batch = self._fetch_batch(seq, until=until)
+            batch = self._fetch_batch(seq, until=until, limit=batch_size)
             if not batch:
                 logger.info("No more records to process. Exiting.")
                 self._emit_progress(
@@ -164,6 +165,11 @@ class AnalyzerWorker:
                 target_seq=workload["target_seq"],
                 last_timestamp=batch[-1].get("timestamp"),
             )
+
+            # Adaptive sizing: if we filled the batch, try larger next time
+            if len(batch) == batch_size:
+                batch_size = min(batch_size * 2, self.config.max_batch_size)
+                logger.debug("Growing batch size to %d", batch_size)
 
     def _describe_workload(self, start_seq: int, until: str | None = None) -> dict[str, int]:
         try:
