@@ -235,9 +235,9 @@ default:
 ```
 /data/
 ├── logs/                           ← llm-data volume
-│   ├── raw.db                      ← 原始元数据（SQLite WAL）
+│   ├── raw.db                      ← 原始元数据（含内联 body BLOB，v1.9.9+ 约 1GB）
 │   └── bodies/
-│       ├── 2026-04-03-14.jsonl     ← 按小时分片的 body 数据
+│       ├── 2026-04-03-14.jsonl     ← 按小时分片的 body 数据（双写，可清理释放空间）
 │       ├── 2026-04-03-15.jsonl
 │       └── manifest.jsonl          ← body 索引
 │
@@ -314,4 +314,55 @@ curl http://localhost:9091/api/conversations?page_size=1
 # 6. 直接查询原始数据验证
 docker compose exec llm-proxy sqlite3 /data/logs/raw.db \
   "SELECT id, method, path, status_code FROM raw_requests ORDER BY seq DESC LIMIT 1;"
+```
+
+## 8. 内联 Body 存储迁移（v1.9.9+）
+
+从 v1.9.9 起，body 数据 zlib 压缩后直接存入 raw.db 的 `request_body` / `response_body` BLOB 列。
+新写入的数据自动双写到 JSONL 文件 + 内联 BLOB。对于已有的 body 数据，需运行一次性迁移脚本。
+
+### 8.1 迁移步骤
+
+```bash
+# 1. 停止服务（避免迁移期间写入冲突）
+docker compose down
+
+# 2. 检查 raw.db 当前大小
+ls -lh /data/logs/raw.db
+
+# 3. 备份 raw.db（可选但推荐）
+sqlite3 /data/logs/raw.db ".backup /data/backup/raw-pre-migrate.db.bak"
+
+# 4. 运行迁移脚本
+#    需要访问 raw.db 和 bodies/ 目录（可在宿主机或容器内执行）
+python scripts/migrate_bodies_to_db.py /data/logs/raw.db /data/logs/bodies
+
+# 5. 验证迁移结果
+sqlite3 /data/logs/raw.db \
+  "SELECT COUNT(*) AS total,
+          SUM(CASE WHEN request_body IS NOT NULL THEN 1 ELSE 0 END) AS req_inline,
+          SUM(CASE WHEN response_body IS NOT NULL THEN 1 ELSE 0 END) AS resp_inline
+   FROM raw_requests;"
+
+# 6. 启动新版本服务
+docker compose up -d
+```
+
+### 8.2 迁移后效果
+
+- **raw.db 增大**：112MB → ~1.1GB（含 ~1GB 压缩 body 数据）
+- **bodies/ JSONL 文件**：可安全删除以释放 ~6.5GB 磁盘空间（确认迁移无误后）
+- **全量同步加速**：本地 3x（49s → 16.6s），生产环境 10-30%+（取决于可迁移记录比例）
+
+### 8.3 可选：清理 JSONL 文件
+
+```bash
+# 确认所有记录都已迁移后，可删除 JSONL shard 文件释放空间
+rm -rf /data/logs/bodies/*.jsonl
+
+# 保留 manifest（分析体量可见性）或一并删除
+# rm -f /data/logs/bodies/manifest.jsonl
+
+# 验证：全量重跑确认一切都正常
+docker compose exec analyzer python -m analyzer --mode=full
 ```

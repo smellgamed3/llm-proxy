@@ -86,6 +86,10 @@ CREATE TABLE raw_requests (
     request_body_ref  TEXT,
     response_body_ref TEXT,
 
+    -- 内联 Body（v1.9.9+，zlib 压缩后直接存储，消除 FUSE 文件 I/O 瓶颈）
+    request_body      BLOB,                          -- zlib(request_body_str)
+    response_body     BLOB,                          -- zlib(response_body_str)
+
     -- 传输特征
     is_stream         INTEGER DEFAULT 0,             -- 1=SSE streaming
     request_body_size  INTEGER,                      -- 字节数
@@ -165,18 +169,36 @@ class SeqGenerator:
             return self._counter
 ```
 
-#### 2.1.3 Body 文件存储
+#### 2.1.3 Body 存储（双写策略 v1.9.9+）
+
+从 v1.9.9 起，body 数据采用**双写策略**，同时写入两种存储：
+
+1. **JSONL 文件**（向后兼容）：写入 `bodies/YYYY-MM-DD-HH.jsonl` + `manifest.jsonl`
+2. **SQLite 内联 BLOB**（主读路径）：zlib 压缩后存入 `request_body` / `response_body` 列
+
+**设计原因**：Docker/OrbStack 的 FUSE 文件系统使 JSONL body 读取成为主要性能瓶颈（占总处理时间 58%）。内联 BLOB 将 body 读取从文件 I/O 变为 SQLite 行内读，大幅减少 FUSE 调用。
+
+**读取优先级**：分析 Worker 优先读取内联 BLOB（`decompress_body`），仅旧记录（无 BLOB 数据）回退到文件读取（`BodyReader` 文件句柄缓存 → manifest → shard scan）。
+
+**迁移工具**：提供一次性迁移脚本 `scripts/migrate_bodies_to_db.py`，将现有 JSONL shard 数据写入 BLOB 列。
+
+**压缩比**（实测 67K records）：
+- 请求体（JSON）：~91%（144.7KB → 13.5KB avg）
+- 响应体（JSON）：~87%（10.4KB → 1.4KB avg）
+- 原始 body 总量：~6.5GB → 压缩后约 1GB 内联在 raw.db 中
+
+**数据目录结构**：
 
 ```
 /data/logs/
-├── raw.db
-└── bodies/
-    ├── 2026-04-03-14.jsonl      ← 14:00~14:59 的 body 数据
-    ├── 2026-04-03-15.jsonl      ← 15:00~15:59
-    └── manifest.jsonl           ← 全局索引
+├── raw.db                        ← 含内联 body BLOB（v1.9.9 迁移后约 1.1GB）
+└── bodies/                       ← JSONL 文件（可删除以释放空间）
+    ├── 2026-04-03-14.jsonl
+    ├── 2026-04-03-15.jsonl
+    └── manifest.jsonl
 ```
 
-**JSONL 行格式**（不变）：
+**JSONL 行格式**（不变，用于向后兼容）：
 ```json
 {"ref": "uuid:request", "timestamp": "...", "data": "..."}
 {"ref": "uuid:response", "timestamp": "...", "data": "..."}
@@ -187,7 +209,7 @@ class SeqGenerator:
 {"ref": "uuid:request", "file": "2026-04-03-14.jsonl", "offset": 0, "length": 1234}
 ```
 
-**分片策略**：
+**分片策略**（不变）：
 - 按 UTC 小时分文件：`YYYY-MM-DD-HH.jsonl`
 - 当前小时文件以 append 模式打开，每小时轮转
 - manifest 同步追加，记录 ref → 文件 + 偏移量映射
@@ -201,7 +223,7 @@ analyzer/
 ├── __init__.py
 ├── __main__.py              ← CLI 入口：python -m analyzer
 ├── worker.py                ← 主循环：轮询 + 游标管理
-├── body_reader.py           ← 从 JSONL 读取 body 内容
+├── body_reader.py           ← 从 JSONL / SQLite BLOB 读取 body 内容
 ├── extractors/
 │   ├── __init__.py
 │   ├── base.py              ← Extractor 抽象基类
@@ -307,8 +329,18 @@ class AnalyzerWorker:
             self._maybe_refresh_daily_stats()
 
     def _process_one(self, record: dict) -> ExtractionResult:
-        req_body = self.body_reader.read(record["request_body_ref"])
-        resp_body = self.body_reader.read(record["response_body_ref"])
+        # 优先读取内联 BLOB（v1.9.9+），回退 JSONL 文件读取
+        req_body = None
+        if record.get("request_body"):
+            req_body = decompress_body(record["request_body"])
+        elif record.get("request_body_ref"):
+            req_body = self.body_reader.read(record["request_body_ref"])
+
+        resp_body = None
+        if record.get("response_body"):
+            resp_body = decompress_body(record["response_body"])
+        elif record.get("response_body_ref"):
+            resp_body = self.body_reader.read(record["response_body_ref"])
 
         for extractor in self.extractors:
             if extractor.can_handle(record["path"], record["method"], ...):
@@ -653,9 +685,9 @@ GET /api/admin/analyzer/status
 ### 3.2 进程隔离
 
 ```
-llm-proxy   → raw.db (读写)    bodies/ (读写)
-analyzer    → raw.db (只读)    bodies/ (只读)    analytics.db (读写)
-api         → raw.db (只读)    bodies/ (只读)    analytics.db (只读)
+llm-proxy   → raw.db (读写)    bodies/ (读写)    ← 双写：JSONL + inline BLOB
+analyzer    → raw.db (只读)    bodies/ (只读)    analytics.db (读写)   ← 优先读 inline BLOB
+api         → raw.db (只读)    bodies/ (只读)    analytics.db (只读)   ← API 读取 body 时也优先 inline BLOB
 ```
 
 SQLite WAL 模式天然支持一写多读的并发模型。

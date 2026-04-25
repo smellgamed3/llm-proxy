@@ -22,24 +22,26 @@
 发布前：
   [ ] 所有测试通过：uv run pytest
   [ ] 无类型错误（如使用 mypy/pyright）
-  [ ] 更新 pyproject.toml 版本号
+  [ ] 更新 pyproject.toml 版本号 + README 版本号 + app.js 版本号
   [ ] 如有 DB schema 变更，编写 migration 脚本
   [ ] 更新 CHANGELOG（如维护）
 
 构建：
-  [ ] docker compose build
-  [ ] 验证三个镜像构建成功
+  [ ] git tag vX.Y.Z && git push origin vX.Y.Z
+  [ ] CI 通过（测试 + 三镜像构建推送到 GHCR）
 
 部署：
   [ ] 备份 raw.db：sqlite3 raw.db ".backup raw-pre-release.db.bak"
-  [ ] docker compose down
+  [ ] docker compose pull          # 拉取新镜像
+  [ ] docker compose down          # 停服
   [ ] 执行 migration 脚本（如有）
-  [ ] docker compose up -d
+  [ ] docker compose up -d         # 启动新版本
   [ ] 验证三个服务健康
 
 验证：
   [ ] curl http://localhost:9090/health → ok
   [ ] Dashboard 可访问
+  [ ] 发一条测试请求，5s 后在 API 中可查到
   [ ] 发一条测试请求，5s 后在 API 中可查到
 ```
 
@@ -90,10 +92,13 @@ find /data/backup -name "raw-*.db.bak" -mtime +30 -delete
 docker compose exec llm-proxy \
   sqlite3 /data/logs/raw.db ".backup /data/backup/raw-manual.db.bak"
 
-# 备份 body 文件（可选，占空间大）
+# 备份 body 文件（可选，占空间大；内联 BLOB 模式则无需单独备份）
 docker compose exec llm-proxy \
   tar czf /data/backup/bodies-$(date +%Y-%m-%d).tar.gz /data/logs/bodies/
 ```
+
+> v1.9.9+ 内联 BLOB 模式下，`raw.db` 已包含全部 body 数据。
+> 备份 raw.db 即包含所有数据（~1.1GB），不再需要单独备份 bodies/ 目录。
 
 #### analytics.db 不需要备份
 
@@ -103,9 +108,62 @@ analytics.db 完全由 raw 数据派生，可随时通过全量重跑重建：
 docker compose exec analyzer python -m analyzer --mode=full
 ```
 
-### 2.2 数据归档
+### 2.2 内联 Body 迁移（v1.9.9+）
 
-当数据量增长时，可归档旧的 body 文件：
+从 v1.9.9 起，body 数据 zlib 压缩后直接存入 `raw.db` 的 `request_body` / `response_body` BLOB 列。
+新写入的记录自动双写到 JSONL 文件 + 内联 BLOB。已有记录需通过以下步骤迁移：
+
+```bash
+# === 完整停服迁移步骤 ===
+
+# 1. 停服
+docker compose down
+
+# 2. 备份（可选但推荐）
+sqlite3 /data/logs/raw.db ".backup /data/backup/raw-pre-migrate.db.bak"
+
+# 3. 运行迁移脚本
+#    脚本在 llm-proxy 源码仓库中：scripts/migrate_bodies_to_db.py
+#    可在宿主机上直接运行（需要访问 raw.db + bodies/ 目录）
+python scripts/migrate_bodies_to_db.py /data/logs/raw.db /data/logs/bodies
+
+# 4. 验证
+sqlite3 /data/logs/raw.db \
+  "SELECT COUNT(*) AS total,
+          SUM(CASE WHEN request_body IS NOT NULL THEN 1 ELSE 0 END) AS inline,
+          SUM(CASE WHEN request_body IS NULL AND request_body_ref IS NOT NULL THEN 1 ELSE 0 END) AS missing
+   FROM raw_requests;"
+
+# 5. 部署新版本并启动
+docker compose up -d
+
+# 6. 触发全量重跑验证
+curl -X POST http://localhost:9091/api/admin/analyzer/sync \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <ADMIN_KEY_HASH>" \
+  -d '{"mode":"full"}'
+```
+
+**注意**：无法迁移的记录（`request_body_ref` / `response_body_ref` 指向已被轮转删除的旧 shard 文件）会保持 NULL，分析 Worker 自动跳过。不影响新数据写入。
+
+### 2.3 迁移后清理
+
+迁移确认无误后，JSONL 文件不再需要（但可保留向后兼容）：
+
+```bash
+# 查看当前 body 文件占用
+du -sh /data/logs/bodies/
+
+# 删除 JSONL shard 文件（保留 manifest 可选）
+find /data/logs/bodies/ -name "*.jsonl" ! -name "manifest.jsonl" -delete
+
+# 如果确认不再需要文件 fallback，可一并删除 manifest
+# rm -f /data/logs/bodies/manifest.jsonl
+```
+
+### 2.4 数据归档
+
+当数据量增长时，可归档旧的 body 文件（仅 JSONL 模式适用，内联 BLOB 无需归档）：
 
 ```bash
 # 归档 30 天前的 JSONL 分片
@@ -121,16 +179,19 @@ docker compose exec analyzer python -m analyzer --mode=range \
 ### 2.3 数据清理
 
 ```bash
-# 清理 raw.db 中超过 N 天的记录（谨慎操作）
+# 清理 raw.db 中超过 N 天的记录（谨慎操作，含内联 body BLOB 一并删除）
 docker compose exec llm-proxy sqlite3 /data/logs/raw.db \
   "DELETE FROM raw_requests WHERE timestamp < datetime('now', '-90 days');"
 
-# 清理对应的 body 文件
+# 清理对应的 JSONL body 文件（如果还保留着）
 find /data/logs/bodies -name "*.jsonl" -not -name "manifest.jsonl" \
   -mtime +90 -delete
 
 # 重建 analytics
 docker compose exec analyzer python -m analyzer --mode=full
+
+# 清理后 VACUUM 回收磁盘空间（DELETE 不会自动缩小文件）
+docker compose exec llm-proxy sqlite3 /data/logs/raw.db "VACUUM;"
 ```
 
 ## 3. 监控
@@ -254,7 +315,7 @@ docker compose exec llm-proxy sh -c \
 docker compose exec api sh -c \
   "du -sh /data/analytics/analytics.db"
 
-# body 文件通常是最大的消费者
+# body 文件通常是最大的消费者（v1.9.9+ 内联 BLOB 后可清理 JSONL 文件释放空间）
 # 查看各月占用
 docker compose exec llm-proxy sh -c \
   "ls -lhS /data/logs/bodies/*.jsonl | head -20"
