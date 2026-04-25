@@ -19,15 +19,25 @@ import signal
 import sqlite3
 import threading
 import time
+import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import orjson
 
-from analyzer.body_reader import compress_body
+from .recorder import _auto_migrate_bodies
 
 logger = logging.getLogger("llm-proxy.recorderd")
+
+_COMPRESS_LEVEL = 6
+
+
+def _compress_body(data: str | None) -> bytes | None:
+    """zlib 压缩 body 文本。返回 bytes 供 SQLite BLOB 列存储。"""
+    if data is None:
+        return None
+    return zlib.compress(data.encode("utf-8"), _COMPRESS_LEVEL)
 
 DEFAULT_SOCKET_PATH = "/var/run/llm-proxy/recorder.sock"
 
@@ -287,6 +297,8 @@ class RecorderServer:
         if "response_body" not in columns:
             conn.execute("ALTER TABLE raw_requests ADD COLUMN response_body BLOB")
 
+        _auto_migrate_bodies(conn, self.db_path, self.bodies_dir)
+
     def _next_seq(self) -> int:
         self._seq += 1
         return self._seq
@@ -312,7 +324,7 @@ class RecorderServer:
                 jsonl_locks=self._jsonl_locks,
             )
             try:
-                request_body_blob = compress_body(body.decode("utf-8"))
+                request_body_blob = _compress_body(body.decode("utf-8"))
             except (UnicodeDecodeError, AttributeError):
                 pass
 
@@ -365,7 +377,7 @@ class RecorderServer:
                 jsonl_locks=self._jsonl_locks,
             )
             try:
-                response_body_blob = compress_body(body)
+                response_body_blob = _compress_body(body)
             except Exception:
                 pass
 

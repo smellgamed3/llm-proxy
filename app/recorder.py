@@ -22,11 +22,148 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from analyzer.body_reader import compress_body
-
 from .config import Config
 
 logger = logging.getLogger("llm-proxy.recorder")
+
+_COMPRESS_LEVEL = 6
+
+
+def _compress_body(data: str | None) -> bytes | None:
+    """zlib 压缩 body 文本。返回 bytes 供 SQLite BLOB 列存储。"""
+    if data is None:
+        return None
+    return zlib.compress(data.encode("utf-8"), _COMPRESS_LEVEL)
+
+
+def _read_body_from_shard(bodies_dir: Path, fname: str, offset: int, length: int) -> bytes | None:
+    """从 JSONL shard 文件读取一条 body 记录，返回 zlib 压缩后的 bytes。"""
+    shard_path = bodies_dir / fname
+    if not shard_path.exists():
+        return None
+    try:
+        with open(shard_path, "rb") as f:
+            f.seek(offset)
+            raw = f.read(length)
+        record = json.loads(raw)
+        body_text = record.get("data")
+        if body_text is None:
+            return None
+        return zlib.compress(body_text.encode("utf-8"), _COMPRESS_LEVEL)
+    except Exception as e:
+        logger.debug("Failed to read from shard %s: %s", fname, e)
+        return None
+
+
+def _auto_migrate_bodies(conn: sqlite3.Connection, db_path: str | Path, bodies_dir: str | Path) -> None:
+    """启动时自动迁移 body 数据到内联 BLOB。
+
+    检查 raw_requests 表，对缺少 inline body 但有 ref 的记录，
+    从 JSONL shard 文件读取 → zlib 压缩 → 写入 BLOB 列。
+    迁移前自动备份 raw.db。
+    """
+    if isinstance(bodies_dir, str):
+        bodies_dir = Path(bodies_dir)
+
+    # 1. 确保 BLOB 列存在
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(raw_requests)").fetchall()}
+    if "request_body" not in columns:
+        conn.execute("ALTER TABLE raw_requests ADD COLUMN request_body BLOB")
+    if "response_body" not in columns:
+        conn.execute("ALTER TABLE raw_requests ADD COLUMN response_body BLOB")
+
+    # 2. 检查是否需要迁移
+    count = conn.execute(
+        "SELECT COUNT(*) FROM raw_requests "
+        "WHERE request_body IS NULL AND (request_body_ref IS NOT NULL OR response_body_ref IS NOT NULL)"
+    ).fetchone()[0]
+    if count == 0:
+        return
+
+    # 3. 加载 manifest
+    manifest_path = bodies_dir / "manifest.jsonl"
+    if not manifest_path.exists():
+        logger.warning(
+            "Auto-migration: %d records need migration but no manifest found at %s",
+            count, manifest_path,
+        )
+        return
+    manifest: dict[str, tuple[str, int, int]] = {}
+    for line in manifest_path.read_text("utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        entry = json.loads(line)
+        ref = entry.get("ref")
+        if ref:
+            manifest[ref] = (entry["file"], entry["offset"], entry["length"])
+    logger.info("Auto-migration: loaded %d manifest entries, %d records to migrate",
+                len(manifest), count)
+
+    # 4. 备份 raw.db（仅首次）
+    db_path_obj = Path(str(db_path))
+    backup_path = db_path_obj.with_suffix(".pre-migrate.bak")
+    if not backup_path.exists():
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        try:
+            backup_conn = sqlite3.connect(str(backup_path))
+            conn.backup(backup_conn)
+            backup_conn.close()
+            logger.info("Auto-migration: backed up raw.db to %s", backup_path)
+        except Exception as e:
+            logger.warning("Auto-migration: backup failed: %s (continuing anyway)", e)
+    else:
+        logger.info("Auto-migration: backup already exists at %s, skipping", backup_path)
+
+    # 5. 分批迁移
+    batch_size = 500
+    migrated = 0
+    errors = 0
+    page = 0
+    while True:
+        rows = conn.execute(
+            "SELECT id, request_body_ref, response_body_ref FROM raw_requests "
+            "WHERE request_body IS NULL AND (request_body_ref IS NOT NULL OR response_body_ref IS NOT NULL) "
+            "ORDER BY seq ASC LIMIT ? OFFSET ?",
+            (batch_size, page * batch_size),
+        ).fetchall()
+        if not rows:
+            break
+        page += 1
+
+        updates: list[tuple[bytes | None, bytes | None, str]] = []
+        for row in rows:
+            rid = row[0]
+            req_blob = resp_blob = None
+            if row[1]:
+                entry = manifest.get(f"{rid}:request")
+                if entry:
+                    req_blob = _read_body_from_shard(bodies_dir, *entry)
+            if row[2]:
+                entry = manifest.get(f"{rid}:response")
+                if entry:
+                    resp_blob = _read_body_from_shard(bodies_dir, *entry)
+            if req_blob is not None or resp_blob is not None:
+                updates.append((req_blob, resp_blob, rid))
+
+        if updates:
+            try:
+                conn.executemany(
+                    "UPDATE raw_requests SET request_body = ?, response_body = ? WHERE id = ?",
+                    updates,
+                )
+                conn.commit()
+            except Exception as e:
+                logger.error("Auto-migration batch failed: %s", e)
+                errors += len(updates)
+                continue
+        migrated += len(updates)
+
+        if page % 10 == 0 or migrated == count:
+            logger.info("Auto-migration: %d/%d done, errors=%d", migrated, count, errors)
+
+    logger.info("Auto-migration: complete! migrated=%d, errors=%d, remaining=%d",
+                migrated, errors, count - migrated)
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +363,7 @@ class Recorder:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_raw_requests_api_key_hash ON raw_requests(api_key_hash)"
         )
+        _auto_migrate_bodies(conn, self.db_path, self.bodies_dir)
 
     # -- sync JSONL write ------------------------------------------------
 
@@ -337,7 +475,7 @@ class Recorder:
         if body:
             body_ref, body_size = self._write_jsonl(request_id, "request", body)
             try:
-                request_body_blob = compress_body(body.decode("utf-8"))
+                request_body_blob = _compress_body(body.decode("utf-8"))
             except (UnicodeDecodeError, AttributeError):
                 pass
 
@@ -403,7 +541,7 @@ class Recorder:
             body_ref, body_size = self._write_jsonl(request_id, "response", stored_body)
             try:
                 body_str = stored_body if isinstance(stored_body, str) else stored_body.decode("utf-8")
-                response_body_blob = compress_body(body_str)
+                response_body_blob = _compress_body(body_str)
             except (UnicodeDecodeError, AttributeError):
                 pass
 
@@ -431,7 +569,7 @@ class Recorder:
     def record_stream_body(self, request_id: str, accumulated_body: str) -> None:
         if self._sync:
             body_ref, body_size = self._write_jsonl(request_id, "response", accumulated_body)
-            response_body_blob = compress_body(accumulated_body)
+            response_body_blob = _compress_body(accumulated_body)
             conn = self._get_conn()
             conn.execute(
                 "UPDATE raw_requests SET response_body_ref = ?, response_body_size = ?, response_body = ? WHERE id = ?",
