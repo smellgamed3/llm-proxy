@@ -34,14 +34,12 @@ logger = logging.getLogger("analyzer.parallel")
 _extractors: list | None = None
 _cost_calculator: Any = None
 _fingerprinter: Any = None
-_body_reader: Any = None  # Worker-local BodyReader for parallel I/O
 
 
-def _init_worker(bodies_dir: str, pricing_file: str) -> None:
+def _init_worker(pricing_file: str) -> None:
     """Initialise heavy objects once per worker process."""
-    global _extractors, _cost_calculator, _fingerprinter, _body_reader
+    global _extractors, _cost_calculator, _fingerprinter
 
-    from analyzer.body_reader import BodyReader
     from analyzer.cost import CostCalculator
     from analyzer.extractors.anthropic import AnthropicExtractor
     from analyzer.extractors.generic import GenericExtractor
@@ -55,8 +53,6 @@ def _init_worker(bodies_dir: str, pricing_file: str) -> None:
     ]
     _cost_calculator = CostCalculator(pricing_file)
     _fingerprinter = Fingerprinter()
-    # 每个 worker 拥有自己的 BodyReader，实现 I/O 并行化
-    _body_reader = BodyReader(bodies_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -64,27 +60,19 @@ def _init_worker(bodies_dir: str, pricing_file: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _read_body(ref: str | None) -> str | None:
-    """Read a single body by ref using the worker-local BodyReader."""
-    if not ref or not _body_reader:
-        return None
-    return _body_reader.read(ref)
-
-
 def _process_record_in_worker(
     args: tuple[dict, str | None, str | None],
 ) -> dict[str, Any] | None:
     """Process a single record using per-process state.
 
-    Worker reads its own request/response bodies from the shared FS,
-    eliminating the serial I/O bottleneck in the main process.
+    ``args`` = ``(record, request_body, response_body)``.
+    Bodies are pre-read by the main process (serial I/O avoids
+    Docker FUSE volume contention from concurrent worker I/O).
     Returns a dict with keys ``conv_data``, ``template_info``, ``date``
     or *None* on error.
     """
     try:
-        record, request_body_ref, response_body_ref = args
-        request_body = _read_body(request_body_ref)
-        response_body = _read_body(response_body_ref)
+        record, request_body, response_body = args
         return process_record_cpu(
             record,
             request_body,
@@ -266,9 +254,8 @@ def resolve_num_workers(configured: int) -> int:
 class ParallelProcessor:
     """Manages a ``ProcessPoolExecutor`` for CPU-bound record processing."""
 
-    def __init__(self, num_workers: int, bodies_dir: str, pricing_file: str):
+    def __init__(self, num_workers: int, pricing_file: str):
         self.num_workers = num_workers
-        self.bodies_dir = bodies_dir
         self.pricing_file = pricing_file
         self._pool: ProcessPoolExecutor | None = None
 
@@ -279,7 +266,7 @@ class ParallelProcessor:
                 max_workers=self.num_workers,
                 mp_context=ctx,
                 initializer=_init_worker,
-                initargs=(self.bodies_dir, self.pricing_file),
+                initargs=(self.pricing_file,),
             )
         return self._pool
 
