@@ -25,6 +25,8 @@ from typing import Any
 
 import orjson
 
+from analyzer.body_reader import compress_body
+
 logger = logging.getLogger("llm-proxy.recorderd")
 
 DEFAULT_SOCKET_PATH = "/var/run/llm-proxy/recorder.sock"
@@ -280,6 +282,10 @@ class RecorderServer:
         }
         if "api_key_hash" not in columns:
             conn.execute("ALTER TABLE raw_requests ADD COLUMN api_key_hash TEXT")
+        if "request_body" not in columns:
+            conn.execute("ALTER TABLE raw_requests ADD COLUMN request_body BLOB")
+        if "response_body" not in columns:
+            conn.execute("ALTER TABLE raw_requests ADD COLUMN response_body BLOB")
 
     def _next_seq(self) -> int:
         self._seq += 1
@@ -298,12 +304,17 @@ class RecorderServer:
 
         body_ref = None
         body_size = None
+        request_body_blob = None
         if body:
             body_ref, body_size = _write_jsonl_line(
                 self.bodies_dir, self.max_body_log_size,
                 record_id=data["id"], direction="request", data=body,
                 jsonl_locks=self._jsonl_locks,
             )
+            try:
+                request_body_blob = compress_body(body.decode("utf-8"))
+            except (UnicodeDecodeError, AttributeError):
+                pass
 
         # 提取 API key hash
         api_key_hash = data.get("api_key_hash")
@@ -319,8 +330,8 @@ class RecorderServer:
         self._writer.enqueue(
             """INSERT INTO raw_requests (id, seq, timestamp, method, path, query_string,
                request_headers, request_body_ref, request_body_size,
-               client_ip, client_port, upstream_url, api_key_hash)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               request_body, client_ip, client_port, upstream_url, api_key_hash)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 data["id"],
                 seq,
@@ -331,6 +342,7 @@ class RecorderServer:
                 json.dumps(dict(headers), ensure_ascii=False),
                 body_ref,
                 body_size,
+                request_body_blob,
                 data.get("client_ip"),
                 data.get("client_port"),
                 data.get("upstream_url"),
@@ -345,23 +357,30 @@ class RecorderServer:
 
         body_ref = None
         body_size = None
+        response_body_blob = None
         if body:
             body_ref, body_size = _write_jsonl_line(
                 self.bodies_dir, self.max_body_log_size,
                 record_id=data["id"], direction="response", data=body,
                 jsonl_locks=self._jsonl_locks,
             )
+            try:
+                response_body_blob = compress_body(body)
+            except Exception:
+                pass
 
         self._writer.enqueue(
             """UPDATE raw_requests SET
                status_code = ?, response_headers = ?, response_body_ref = ?,
-               response_body_size = ?, is_stream = ?, duration_ms = ?, error = ?
+               response_body_size = ?, response_body = ?,
+               is_stream = ?, duration_ms = ?, error = ?
                WHERE id = ?""",
             (
                 data.get("status_code"),
                 json.dumps(dict(headers), ensure_ascii=False),
                 body_ref,
                 body_size,
+                response_body_blob,
                 1 if data.get("is_stream") else 0,
                 data.get("duration_ms"),
                 data.get("error"),

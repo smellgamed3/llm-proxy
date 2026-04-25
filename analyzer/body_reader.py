@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+import zlib
 from pathlib import Path
 
 import orjson
@@ -10,6 +11,22 @@ logger = logging.getLogger("analyzer.body_reader")
 
 _MAX_OPEN_FILES = 50
 _FILE_IDLE_TIMEOUT = 30.0
+
+_COMPRESS_LEVEL = 6
+
+
+def compress_body(data: str | None) -> bytes | None:
+    """zlib 压缩 body 文本。返回 bytes 供 SQLite BLOB 列存储。"""
+    if data is None:
+        return None
+    return zlib.compress(data.encode("utf-8"), _COMPRESS_LEVEL)
+
+
+def decompress_body(data: bytes | None) -> str | None:
+    """解压 zlib 压缩的 body BLOB。"""
+    if data is None:
+        return None
+    return zlib.decompress(data).decode("utf-8")
 
 
 class BodyReader:

@@ -22,6 +22,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from analyzer.body_reader import compress_body
+
 from .config import Config
 
 logger = logging.getLogger("llm-proxy.recorder")
@@ -217,6 +219,10 @@ class Recorder:
         }
         if "api_key_hash" not in raw_request_columns:
             conn.execute("ALTER TABLE raw_requests ADD COLUMN api_key_hash TEXT")
+        if "request_body" not in raw_request_columns:
+            conn.execute("ALTER TABLE raw_requests ADD COLUMN request_body BLOB")
+        if "response_body" not in raw_request_columns:
+            conn.execute("ALTER TABLE raw_requests ADD COLUMN response_body BLOB")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_raw_requests_api_key_hash ON raw_requests(api_key_hash)"
         )
@@ -327,8 +333,13 @@ class Recorder:
                              headers, body, client_ip, client_port, upstream_url):
         body_ref = None
         body_size = None
+        request_body_blob = None
         if body:
             body_ref, body_size = self._write_jsonl(request_id, "request", body)
+            try:
+                request_body_blob = compress_body(body.decode("utf-8"))
+            except (UnicodeDecodeError, AttributeError):
+                pass
 
         api_key_hash = self.extract_api_key_hash(headers)
         seq = self._seq.next()
@@ -336,8 +347,8 @@ class Recorder:
         conn.execute(
             """INSERT INTO raw_requests (id, seq, timestamp, method, path, query_string,
                request_headers, request_body_ref, request_body_size,
-               client_ip, client_port, upstream_url, api_key_hash)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               request_body, client_ip, client_port, upstream_url, api_key_hash)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 request_id,
                 seq,
@@ -348,6 +359,7 @@ class Recorder:
                 json.dumps(dict(headers), ensure_ascii=False),
                 body_ref,
                 body_size,
+                request_body_blob,
                 client_ip,
                 client_port,
                 upstream_url,
@@ -385,21 +397,29 @@ class Recorder:
                               is_stream, duration_ms, error):
         body_ref = None
         body_size = None
+        response_body_blob = None
         if body:
             stored_body = _decode_body_for_storage(body, headers)
             body_ref, body_size = self._write_jsonl(request_id, "response", stored_body)
+            try:
+                body_str = stored_body if isinstance(stored_body, str) else stored_body.decode("utf-8")
+                response_body_blob = compress_body(body_str)
+            except (UnicodeDecodeError, AttributeError):
+                pass
 
         conn = self._get_conn()
         conn.execute(
             """UPDATE raw_requests SET
                status_code = ?, response_headers = ?, response_body_ref = ?,
-               response_body_size = ?, is_stream = ?, duration_ms = ?, error = ?
+               response_body_size = ?, response_body = ?,
+               is_stream = ?, duration_ms = ?, error = ?
                WHERE id = ?""",
             (
                 status_code,
                 json.dumps(dict(headers), ensure_ascii=False),
                 body_ref,
                 body_size,
+                response_body_blob,
                 1 if is_stream else 0,
                 duration_ms,
                 error,
@@ -411,10 +431,11 @@ class Recorder:
     def record_stream_body(self, request_id: str, accumulated_body: str) -> None:
         if self._sync:
             body_ref, body_size = self._write_jsonl(request_id, "response", accumulated_body)
+            response_body_blob = compress_body(accumulated_body)
             conn = self._get_conn()
             conn.execute(
-                "UPDATE raw_requests SET response_body_ref = ?, response_body_size = ? WHERE id = ?",
-                (body_ref, body_size, request_id),
+                "UPDATE raw_requests SET response_body_ref = ?, response_body_size = ?, response_body = ? WHERE id = ?",
+                (body_ref, body_size, response_body_blob, request_id),
             )
             conn.commit()
         else:

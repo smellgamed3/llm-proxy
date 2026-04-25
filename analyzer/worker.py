@@ -7,7 +7,7 @@ from typing import Any, Callable
 
 import orjson
 
-from .body_reader import BodyReader
+from .body_reader import BodyReader, decompress_body
 from .config import AnalyzerConfig
 from .cost import CostCalculator
 from .extractors.anthropic import AnthropicExtractor
@@ -365,10 +365,26 @@ class AnalyzerWorker:
     ) -> dict[str, Any] | None:
         """Single-record processing kept for admin/test compatibility."""
         try:
-            request_ref = record.get("request_body_ref")
-            response_ref = record.get("response_body_ref")
-            request_body = self.body_reader.read(request_ref) if request_ref else None
-            response_body = self.body_reader.read(response_ref) if response_ref else None
+            # request body: inline BLOB > file I/O
+            request_body: str | None = None
+            req_ref = record.get("request_body_ref")
+            if req_ref:
+                raw = record.get("request_body")
+                if raw is not None:
+                    request_body = decompress_body(raw)
+                else:
+                    request_body = self.body_reader.read(req_ref)
+
+            # response body: inline BLOB > file I/O
+            response_body: str | None = None
+            resp_ref = record.get("response_body_ref")
+            if resp_ref:
+                raw = record.get("response_body")
+                if raw is not None:
+                    response_body = decompress_body(raw)
+                else:
+                    response_body = self.body_reader.read(resp_ref)
+
             result = process_record_cpu(
                 record,
                 request_body,
@@ -393,18 +409,47 @@ class AnalyzerWorker:
         self,
         batch: list[dict],
     ) -> list[tuple[dict, str | None, str | None]]:
-        """读取 body 并构造 worker 任务元组。"""
-        body_refs: list[str] = []
+        """读取 body 并构造 worker 任务元组。
+
+        优先从 SQLite inline BLOB 列读取（decompress_body），
+        回退到 BodyReader 文件 I/O（旧记录）。
+        """
+        # 收集需要文件读取的 ref
+        refs_to_read: list[str] = []
         for record in batch:
-            if record.get("request_body_ref"):
-                body_refs.append(record["request_body_ref"])
-            if record.get("response_body_ref"):
-                body_refs.append(record["response_body_ref"])
-        bodies = self.body_reader.read_batch(body_refs) if body_refs else {}
+            req_ref = record.get("request_body_ref")
+            if req_ref and record.get("request_body") is None:
+                refs_to_read.append(req_ref)
+            resp_ref = record.get("response_body_ref")
+            if resp_ref and record.get("response_body") is None:
+                refs_to_read.append(resp_ref)
+
+        file_bodies: dict[str, str | None] = {}
+        if refs_to_read:
+            file_bodies = self.body_reader.read_batch(refs_to_read)
+
         tasks: list[tuple[dict, str | None, str | None]] = []
         for record in batch:
-            req_body = bodies.get(record.get("request_body_ref")) if record.get("request_body_ref") else None
-            resp_body = bodies.get(record.get("response_body_ref")) if record.get("response_body_ref") else None
+            # request body: inline BLOB > file
+            req_body: str | None = None
+            req_ref = record.get("request_body_ref")
+            if req_ref:
+                raw = record.get("request_body")
+                if raw is not None:
+                    req_body = decompress_body(raw)
+                else:
+                    req_body = file_bodies.get(req_ref)
+
+            # response body: inline BLOB > file
+            resp_body: str | None = None
+            resp_ref = record.get("response_body_ref")
+            if resp_ref:
+                raw = record.get("response_body")
+                if raw is not None:
+                    resp_body = decompress_body(raw)
+                else:
+                    resp_body = file_bodies.get(resp_ref)
+
             tasks.append((record, req_body, resp_body))
         return tasks
 
