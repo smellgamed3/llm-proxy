@@ -66,6 +66,7 @@ class AnalyzerWorker:
             finally:
                 self._shutdown_pool()
                 self._close_raw_conn()
+                self.body_reader.close()
             return
 
         try:
@@ -73,6 +74,7 @@ class AnalyzerWorker:
         finally:
             self._shutdown_pool()
             self._close_raw_conn()
+            self.body_reader.close()
 
     def _shutdown_pool(self) -> None:
         if self._parallel is not None:
@@ -139,6 +141,12 @@ class AnalyzerWorker:
             target_seq=workload["target_seq"],
             last_timestamp=None,
         )
+
+        # 多进程 pipeline：重叠 body I/O 与 CPU 处理
+        if self._parallel is not None:
+            return self._process_available_pipeline(seq, until, workload, batch_size)
+
+        # 单进程模式：保持原有串行方式
         while True:
             if self._should_stop():
                 logger.info("Analyzer stop requested before fetching next batch")
@@ -181,6 +189,102 @@ class AnalyzerWorker:
             if len(batch) == batch_size:
                 batch_size = min(batch_size * 2, self.config.max_batch_size)
                 logger.debug("Growing batch size to %d", batch_size)
+
+    def _process_available_pipeline(
+        self,
+        start_seq: int,
+        until: str | None,
+        workload: dict[str, int],
+        start_batch_size: int,
+    ) -> dict[str, int]:
+        """Pipeline 模式：重叠 body I/O 与 CPU 处理实现最大吞吐。
+
+        流程（每轮循环）：
+          1. 读取当前 batch 的 body 并提交到 pool（I/O）
+          2. 读取下一个 batch 的 body（I/O，与 pool CPU 重叠）
+          3. collect 当前 batch 结果（等待剩余 CPU）
+          4. 写入 DB
+          5. 提交下一个 batch 到 pool
+          → 回到步骤 1（body I/O 与 CPU 持续重叠）
+        """
+        seq = start_seq
+        processed_total = 0
+        batch_size = start_batch_size
+
+        # Prime: 第一个 batch — 无重叠
+        batch = self._fetch_batch(seq, until=until, limit=batch_size)
+        if not batch:
+            self._emit_progress(
+                processed_rows=0,
+                total_rows=workload["total_rows"],
+                current_seq=seq,
+                target_seq=workload["target_seq"],
+                last_timestamp=None,
+            )
+            return {
+                "processed": 0,
+                "last_seq": seq,
+                "total_rows": workload["total_rows"],
+                "target_seq": workload["target_seq"],
+                "stopped": False,
+            }
+
+        tasks = self._build_tasks_from_batch(batch)
+        futures = self._parallel.submit_batch(tasks)
+        last_seq = batch[-1]["seq"]
+
+        while True:
+            if self._should_stop():
+                logger.info("Analyzer stop requested")
+                return {
+                    "processed": processed_total,
+                    "last_seq": last_seq,
+                    "total_rows": workload["total_rows"],
+                    "target_seq": workload["target_seq"],
+                    "stopped": True,
+                }
+
+            # Step A: 读取下一个 batch 的 body（I/O，与 pool CPU 并行）
+            next_batch = self._fetch_batch(last_seq, until=until, limit=batch_size)
+            if next_batch:
+                next_tasks = self._build_tasks_from_batch(next_batch)
+
+            # Step B: 收集当前 batch 结果（阻塞等待）
+            results = self._parallel.collect_results(futures, len(batch))
+
+            # Step C: 写入当前 batch
+            processed = self._write_batch_results(results, batch, last_seq)
+            processed_total += processed
+            seq = last_seq
+
+            self._emit_progress(
+                processed_rows=processed_total,
+                total_rows=workload["total_rows"],
+                current_seq=seq,
+                target_seq=workload["target_seq"],
+                last_timestamp=batch[-1].get("timestamp"),
+            )
+
+            if not next_batch:
+                break
+
+            # Step D: 提交下一个 batch
+            futures = self._parallel.submit_batch(next_tasks)
+            batch = next_batch
+            last_seq = next_batch[-1]["seq"]
+
+            # 自适应 batch size
+            if len(batch) == batch_size:
+                batch_size = min(batch_size * 2, self.config.max_batch_size)
+                logger.debug("Growing batch size to %d", batch_size)
+
+        return {
+            "processed": processed_total,
+            "last_seq": seq,
+            "total_rows": workload["total_rows"],
+            "target_seq": workload["target_seq"],
+            "stopped": False,
+        }
 
     def _describe_workload(self, start_seq: int, until: str | None = None) -> dict[str, int]:
         try:
@@ -232,84 +336,16 @@ class AnalyzerWorker:
             return False
 
     def _process_batch(self, batch: list[dict], current_seq: int) -> tuple[int, int]:
-        seq = current_seq
-        dates_to_refresh: set[str] = set()
-        processed = 0
-
-        # --- Step 1 & 2: CPU processing (parallel or single-process) ---
         if self._parallel is not None:
-            body_refs: list[str] = []
-            for record in batch:
-                if record.get("request_body_ref"):
-                    body_refs.append(record["request_body_ref"])
-                if record.get("response_body_ref"):
-                    body_refs.append(record["response_body_ref"])
-
-            bodies = self.body_reader.read_batch(body_refs) if body_refs else {}
-            tasks: list[tuple[dict, str | None, str | None]] = []
-            for record in batch:
-                req_body = bodies.get(record.get("request_body_ref")) if record.get("request_body_ref") else None
-                resp_body = bodies.get(record.get("response_body_ref")) if record.get("response_body_ref") else None
-                tasks.append((record, req_body, resp_body))
+            tasks = self._build_tasks_from_batch(batch)
             results = self._parallel.process_batch(tasks)
         else:
+            dates_to_refresh: set[str] = set()
             results = self._process_batch_single(batch, dates_to_refresh)
 
-        # --- Step 3: Batch-write results (I/O, main process) ---
-        conv_list: list[dict] = []
-        template_list: list[tuple[str, str, str | None, float | None]] = []
-
-        for i, result in enumerate(results):
-            record = batch[i]
-            seq = record["seq"]
-            processed += 1
-
-            if result is None:
-                logger.error("Failed to process record %s", record.get("id"))
-                continue
-
-            conv_list.append(result["conv_data"])
-            if result["template_info"]:
-                template_list.append(result["template_info"])
-            if result["date"]:
-                dates_to_refresh.add(result["date"])
-
-        # 构建 daily_stats 行
-        daily_rows: list[tuple] = []
-        for conv in conv_list:
-            ts = conv.get("timestamp", "")
-            date = ts[:10] if ts else ""
-            if not date:
-                continue
-            model = conv.get("model") or "unknown"
-            provider = conv.get("provider") or "unknown"
-            is_success = 1 if conv.get("status") == "success" else 0
-            is_error = 1 if conv.get("status") != "success" else 0
-            daily_rows.append((
-                date, model, provider,
-                1, is_success, is_error,
-                conv.get("total_tokens") or 0,
-                conv.get("prompt_tokens") or 0,
-                conv.get("completion_tokens") or 0,
-                conv.get("cost_usd") or 0.0,
-                conv.get("duration_ms") or 0.0,
-            ))
-
-        # 使用组合事务：upsert + daily_stats + watermark 在同一事务中原子完成
-        # 崩溃恢复时不会出现数据与 watermark 不一致的情况
-        try:
-            self.analytics_store.commit_batch_with_watermark(
-                conv_list, template_list, daily_rows, seq, processed,
-            )
-        except Exception as e:
-            logger.error("Failed to commit batch at seq %d: %s, falling back to refresh", seq, e)
-            for date in dates_to_refresh:
-                try:
-                    self.analytics_store.refresh_daily_stats(date)
-                except Exception as e2:
-                    logger.warning("Failed to refresh daily stats for %s: %s", date, e2)
-
-        return seq, processed
+        watermark_seq = batch[-1]["seq"] if batch else current_seq
+        processed = self._write_batch_results(results, batch, watermark_seq)
+        return watermark_seq, processed
 
     def _process_batch_single(
         self,
@@ -352,6 +388,90 @@ class AnalyzerWorker:
                 exc_info=True,
             )
             return None
+
+    def _build_tasks_from_batch(
+        self,
+        batch: list[dict],
+    ) -> list[tuple[dict, str | None, str | None]]:
+        """读取 body 并构造 worker 任务元组。"""
+        body_refs: list[str] = []
+        for record in batch:
+            if record.get("request_body_ref"):
+                body_refs.append(record["request_body_ref"])
+            if record.get("response_body_ref"):
+                body_refs.append(record["response_body_ref"])
+        bodies = self.body_reader.read_batch(body_refs) if body_refs else {}
+        tasks: list[tuple[dict, str | None, str | None]] = []
+        for record in batch:
+            req_body = bodies.get(record.get("request_body_ref")) if record.get("request_body_ref") else None
+            resp_body = bodies.get(record.get("response_body_ref")) if record.get("response_body_ref") else None
+            tasks.append((record, req_body, resp_body))
+        return tasks
+
+    def _write_batch_results(
+        self,
+        results: list[dict[str, Any] | None],
+        batch: list[dict],
+        watermark_seq: int,
+    ) -> int:
+        """将处理结果写入 analytics DB。返回处理的记录数。"""
+        dates_to_refresh: set[str] = set()
+        conv_list: list[dict] = []
+        template_list: list[tuple[str, str, str | None, float | None]] = []
+        processed = 0
+
+        for i, result in enumerate(results):
+            record = batch[i]
+            processed += 1
+            if result is None:
+                logger.error("Failed to process record %s", record.get("id"))
+                continue
+            conv_list.append(result["conv_data"])
+            if result["template_info"]:
+                template_list.append(result["template_info"])
+            if result["date"]:
+                dates_to_refresh.add(result["date"])
+
+        # 构建 daily_stats 行
+        daily_rows: list[tuple] = []
+        for conv in conv_list:
+            ts = conv.get("timestamp", "")
+            date = ts[:10] if ts else ""
+            if not date:
+                continue
+            model = conv.get("model") or "unknown"
+            provider = conv.get("provider") or "unknown"
+            is_success = 1 if conv.get("status") == "success" else 0
+            is_error = 1 if conv.get("status") != "success" else 0
+            daily_rows.append((
+                date, model, provider,
+                1, is_success, is_error,
+                conv.get("total_tokens") or 0,
+                conv.get("prompt_tokens") or 0,
+                conv.get("completion_tokens") or 0,
+                conv.get("cost_usd") or 0.0,
+                conv.get("duration_ms") or 0.0,
+            ))
+
+        # 组合事务：upsert + daily_stats + watermark 原子写入
+        try:
+            self.analytics_store.commit_batch_with_watermark(
+                conv_list, template_list, daily_rows, watermark_seq, processed,
+            )
+        except Exception as e:
+            logger.error(
+                "Failed to commit batch at seq %d: %s, falling back to refresh",
+                watermark_seq, e,
+            )
+            for date in dates_to_refresh:
+                try:
+                    self.analytics_store.refresh_daily_stats(date)
+                except Exception as e2:
+                    logger.warning(
+                        "Failed to refresh daily stats for %s: %s", date, e2,
+                    )
+
+        return processed
 
     def _get_raw_conn(self) -> sqlite3.Connection:
         """复用持久 raw.db 连接，避免每轮轮询重新 connect + close。"""

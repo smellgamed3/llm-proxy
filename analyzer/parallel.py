@@ -281,7 +281,6 @@ class ParallelProcessor:
         导致内存压力。
         """
         pool = self._ensure_pool()
-        # 每轮最多提交 pool_size * 2 个任务，平衡吞吐和内存
         chunk_size = self.num_workers * 2
         results: list[dict[str, Any] | None] = [None] * len(tasks)
 
@@ -300,6 +299,46 @@ class ParallelProcessor:
                 except Exception as exc:
                     logger.error("Future %d failed: %s", idx, exc)
 
+        return results
+
+    def submit_batch(
+        self,
+        tasks: list[tuple[dict, str | None, str | None]],
+    ) -> list:
+        """Non-blocking: 提交所有任务到进程池，立即返回 future 列表。
+
+        配合 ``collect_results()`` 使用，实现 body I/O 与 CPU 的 pipelining：
+        ``submit_batch(N) → read_bodies(N+1) → collect_results(N) → write_DB(N)``
+        """
+        pool = self._ensure_pool()
+        chunk_size = self.num_workers * 2
+        indexed: dict = {}
+        for start in range(0, len(tasks), chunk_size):
+            chunk = tasks[start:start + chunk_size]
+            for i, t in enumerate(chunk):
+                actual_idx = start + i
+                fut = pool.submit(_process_record_in_worker, t)
+                indexed[fut] = actual_idx
+        return indexed
+
+    @staticmethod
+    def collect_results(
+        indexed: dict,
+        num_tasks: int,
+    ) -> list[dict[str, Any] | None]:
+        """收集 ``submit_batch`` 提交的 future 结果。
+
+        Args:
+            indexed: ``submit_batch`` 返回的 ``{future: index}`` 映射。
+            num_tasks: 原始任务总数。
+        """
+        results: list[dict[str, Any] | None] = [None] * num_tasks
+        for fut in as_completed(indexed):
+            idx = indexed[fut]
+            try:
+                results[idx] = fut.result()
+            except Exception as exc:
+                logger.error("Future %d failed: %s", idx, exc)
         return results
 
     def shutdown(self) -> None:
