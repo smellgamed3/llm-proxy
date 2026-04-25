@@ -19,6 +19,9 @@ htmlcov/
 
 # Local data
 /data/
+
+# Benchmarks
+/tmp_bench/
 *.db
 *.jsonl
 

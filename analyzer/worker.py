@@ -50,7 +50,9 @@ class AnalyzerWorker:
         self._num_workers = resolve_num_workers(config.num_workers)
         self._parallel: ParallelProcessor | None = None
         if self._num_workers > 1:
-            self._parallel = ParallelProcessor(self._num_workers, config.pricing_file)
+            self._parallel = ParallelProcessor(
+                self._num_workers, config.bodies_dir, config.pricing_file
+            )
             logger.info(
                 "Parallel processing enabled with %d workers", self._num_workers
             )
@@ -238,19 +240,13 @@ class AnalyzerWorker:
 
         # --- Step 1 & 2: CPU processing (parallel or single-process) ---
         if self._parallel is not None:
-            body_refs: list[str] = []
-            for record in batch:
-                if record.get("request_body_ref"):
-                    body_refs.append(record["request_body_ref"])
-                if record.get("response_body_ref"):
-                    body_refs.append(record["response_body_ref"])
-
-            bodies = self.body_reader.read_batch(body_refs) if body_refs else {}
             tasks: list[tuple[dict, str | None, str | None]] = []
             for record in batch:
-                req_body = bodies.get(record.get("request_body_ref")) if record.get("request_body_ref") else None
-                resp_body = bodies.get(record.get("response_body_ref")) if record.get("response_body_ref") else None
-                tasks.append((record, req_body, resp_body))
+                tasks.append((
+                    record,
+                    record.get("request_body_ref"),
+                    record.get("response_body_ref"),
+                ))
             results = self._parallel.process_batch(tasks)
         else:
             results = self._process_batch_single(batch, dates_to_refresh)
