@@ -162,8 +162,21 @@ def _auto_migrate_bodies(conn: sqlite3.Connection, db_path: str | Path, bodies_d
         if page % 10 == 0 or migrated == count:
             logger.info("Auto-migration: %d/%d done, errors=%d", migrated, count, errors)
 
-    logger.info("Auto-migration: complete! migrated=%d, errors=%d, remaining=%d",
-                migrated, errors, count - migrated)
+    # 6. 清理无法迁移记录的 ref 字段，防止下次启动重复扫描
+    stale = conn.execute(
+        "SELECT COUNT(*) FROM raw_requests "
+        "WHERE request_body IS NULL AND (request_body_ref IS NOT NULL OR response_body_ref IS NOT NULL)"
+    ).fetchone()[0]
+    if stale:
+        conn.execute(
+            "UPDATE raw_requests SET request_body_ref = NULL, response_body_ref = NULL "
+            "WHERE request_body IS NULL AND (request_body_ref IS NOT NULL OR response_body_ref IS NOT NULL)"
+        )
+        conn.commit()
+        logger.info("Auto-migration: cleaned %d stale refs (shard files no longer available)", stale)
+
+    logger.info("Auto-migration: complete! migrated=%d, cleaned=%d, errors=%d, total=%d",
+                migrated, stale, errors, count)
 
 
 # ---------------------------------------------------------------------------
